@@ -323,7 +323,7 @@ async def test_codex_failure_releases_claim_to_retry_queue(
     assert item["claim"] == {"worker_id": None, "expires_at": None}
 
 
-async def test_codex_continuation_resumes_thread_across_runner_processes(
+async def test_codex_continuation_stays_in_one_attempt_and_live_process(
     authenticated_api,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -331,7 +331,6 @@ async def test_codex_continuation_resumes_thread_across_runner_processes(
     headers = {"Authorization": "Bearer integration-secret"}
     monkeypatch.setenv("CONTROL_PLANE_TOKEN", "integration-secret")
     monkeypatch.setenv("FAKE_CODEX_MODE", "continuation")
-    monkeypatch.setenv("FAKE_CODEX_STATE_FILE", str(tmp_path / "codex-state"))
     fake_server = Path(__file__).with_name("fake_codex_app_server.py")
     command = subprocess.list2cmdline([sys.executable, str(fake_server)])
     workflow = load_workflow(write_workflow(tmp_path, command))
@@ -344,34 +343,19 @@ async def test_codex_continuation_resumes_thread_across_runner_processes(
         headers=headers,
     )
 
-    first_tracker = ControlPlaneTracker(
+    tracker = ControlPlaneTracker(
         workflow.tracker,
         transport=httpx.ASGITransport(app=authenticated_api.app),
     )
     try:
-        async with WindowsSymphony(workflow, tracker=first_tracker) as orchestrator:
-            first = await orchestrator.run_once()
+        async with WindowsSymphony(workflow, tracker=tracker) as orchestrator:
+            outcomes = await orchestrator.run_once()
     finally:
-        await first_tracker.close()
-    assert first[0].status == "continuation_queued"
-    attempts = (
-        await authenticated_api.get("/api/work-items/WI-001/attempts", headers=headers)
-    ).json()
-    assert attempts[0]["thread_id"] == "thread-test"
+        await tracker.close()
 
-    await asyncio.sleep(1.1)
-    await authenticated_api.post("/api/maintenance/tick", json={}, headers=headers)
-    second_tracker = ControlPlaneTracker(
-        workflow.tracker,
-        transport=httpx.ASGITransport(app=authenticated_api.app),
-    )
-    try:
-        async with WindowsSymphony(workflow, tracker=second_tracker) as orchestrator:
-            second = await orchestrator.run_once()
-    finally:
-        await second_tracker.close()
-
-    assert second[0].status == "work_item_released"
+    assert outcomes[0].status == "work_item_released"
+    assert outcomes[0].thread_id == "thread-test"
+    assert outcomes[0].turn_id == "turn-test-2"
     item = (
         await authenticated_api.get("/api/work-items/WI-001", headers=headers)
     ).json()
@@ -379,8 +363,84 @@ async def test_codex_continuation_resumes_thread_across_runner_processes(
     attempts = (
         await authenticated_api.get("/api/work-items/WI-001/attempts", headers=headers)
     ).json()
-    assert [attempt["attempt_number"] for attempt in attempts] == [1, 2]
+    assert [attempt["attempt_number"] for attempt in attempts] == [1]
     assert attempts[0]["thread_id"] == "thread-test"
+    assert attempts[0]["turn_id"] == "turn-test-2"
+    execution_events = (
+        await authenticated_api.get(
+            f"/api/work-items/WI-001/attempts/{attempts[0]['id']}/events",
+            headers=headers,
+        )
+    ).json()
+    assert [
+        event["event_type"] for event in execution_events
+    ].count("turn_started") == 2
+    work_item_events = (
+        await authenticated_api.get("/api/work-items/WI-001/events", headers=headers)
+    ).json()
+    work_item_statuses = [event["to_status"] for event in work_item_events]
+    assert "retry_queued" not in work_item_statuses
+
+
+async def test_multi_turn_attempt_blocks_only_after_session_turn_limit(
+    authenticated_api,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = {"Authorization": "Bearer integration-secret"}
+    monkeypatch.setenv("CONTROL_PLANE_TOKEN", "integration-secret")
+    monkeypatch.setenv("FAKE_CODEX_MODE", "exhaust")
+    fake_server = Path(__file__).with_name("fake_codex_app_server.py")
+    command = subprocess.list2cmdline([sys.executable, str(fake_server)])
+    workflow = load_workflow(write_workflow(tmp_path, command))
+    workflow = replace(
+        workflow,
+        agent_profiles=(replace(workflow.agent_profiles[0], max_turns=2),),
+    )
+    await authenticated_api.post(
+        "/api/features", json=feature_payload(), headers=headers
+    )
+    await authenticated_api.post(
+        "/api/work-items",
+        json=work_item_payload("WI-001", status="ready"),
+        headers=headers,
+    )
+    tracker = ControlPlaneTracker(
+        workflow.tracker,
+        transport=httpx.ASGITransport(app=authenticated_api.app),
+    )
+    try:
+        async with WindowsSymphony(workflow, tracker=tracker) as orchestrator:
+            outcomes = await orchestrator.run_once()
+    finally:
+        await tracker.close()
+
+    assert outcomes[0].status == "max_turns_exceeded"
+    item = (
+        await authenticated_api.get("/api/work-items/WI-001", headers=headers)
+    ).json()
+    assert item["status"] == "blocked"
+    assert item["blocker"]["code"] == "max_turns_exceeded"
+    attempts = (
+        await authenticated_api.get("/api/work-items/WI-001/attempts", headers=headers)
+    ).json()
+    assert len(attempts) == 1
+    assert attempts[0]["status"] == "blocked"
+    execution_events = (
+        await authenticated_api.get(
+            f"/api/work-items/WI-001/attempts/{attempts[0]['id']}/events",
+            headers=headers,
+        )
+    ).json()
+    assert [
+        event["event_type"] for event in execution_events
+    ].count("turn_started") == 2
+    work_item_events = (
+        await authenticated_api.get("/api/work-items/WI-001/events", headers=headers)
+    ).json()
+    assert "retry_queued" not in [
+        event["to_status"] for event in work_item_events
+    ]
 
 
 async def test_skill_human_confirmation_exits_and_resumes_ready(

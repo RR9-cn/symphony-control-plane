@@ -331,11 +331,25 @@ class ClaimRequest(ApiModel):
     profile: AgentProfileClaim | None = None
 
 
+class DecisionView(ApiModel):
+    id: str
+    work_item_id: str
+    question: str
+    options: list[str]
+    status: str
+    response: str | None
+    requested_by: str | None
+    resolved_by: str | None
+    created_at: datetime
+    resolved_at: datetime | None
+
+
 class ClaimResult(ApiModel):
     work_item: WorkItemView
     claim_token: str
     attempt: AgentAttemptView
     resume_thread_id: str | None = None
+    resume_decisions: list[DecisionView] = Field(default_factory=list)
     continuation_turn_count: int = Field(default=0, ge=0)
 
 
@@ -450,19 +464,6 @@ class DecisionCommand(ApiModel):
                 "decision_id and response are required when action=resolve"
             )
         return self
-
-
-class DecisionView(ApiModel):
-    id: str
-    work_item_id: str
-    question: str
-    options: list[str]
-    status: str
-    response: str | None
-    requested_by: str | None
-    resolved_by: str | None
-    created_at: datetime
-    resolved_at: datetime | None
 
 
 class MaintenanceResult(ApiModel):

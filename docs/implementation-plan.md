@@ -467,7 +467,7 @@ Bearer Token 与 Claim Token 只在 Windows Runner 宿主进程使用；启动 C
 - `WorkspaceManager` 校验 Windows 保留名、路径穿越、符号链接逃逸和 Workspace Root 边界，并执行 PowerShell 生命周期 Hook；
 - `ControlPlaneTracker` 负责候选查询、原子 Claim、Heartbeat、Retry Release 和六个绑定当前 WorkItem 的动态工具；
 - `CodexAppServer` 直接启动 Windows 子进程，通过 JSONL stdio 执行 `initialize`、`thread/start`、`turn/start` 和动态工具回包；
-- `WindowsSymphony` 实现优先级调度、全局并发槽位、Claim 冲突处理、Heartbeat、Claim 丢失终止、1 秒 continuation 和 10 秒起始的指数退避；
+- `WindowsSymphony` 实现优先级调度、全局并发槽位、Claim 冲突处理、Heartbeat、Claim 丢失终止、同一进程内多 Turn continuation 和 10 秒起始的异常指数退避；
 - Control Plane Release API 支持由 Runner 指定有界 Retry Delay；
 - Bearer Token 与 Claim Token 不进入 Tool Schema、Prompt 或 Codex 子进程环境；
 - 自动化端到端测试使用真实 Windows 子进程和假 Codex App Server，覆盖发现、Claim、六工具注册、事件、Handoff、完成和 Blocked 回写；
@@ -495,7 +495,7 @@ agent_profiles:
       - fskill-analysis-tech
       - fskill-knowledge-query
       - fskill-tools-db
-    sandbox: workspace-write
+    sandbox: danger-full-access
     max_concurrent_agents: 2
     max_turns: 10
 
@@ -507,7 +507,7 @@ agent_profiles:
       - fskill-code-java-guide
       - fskill-knowledge-query
       - fskill-tools-db
-    sandbox: workspace-write
+    sandbox: danger-full-access
     network_access: true
     max_concurrent_agents: 5
     max_turns: 20
@@ -518,7 +518,7 @@ agent_profiles:
     prompt_file: workflows/code-reviewer.md
     skills:
       - fskill-code-review
-    sandbox: read-only
+    sandbox: danger-full-access
     max_concurrent_agents: 3
 
   test_designer:
@@ -527,7 +527,7 @@ agent_profiles:
     prompt_file: workflows/test-designer.md
     skills:
       - fskill-test-explore
-    sandbox: workspace-write
+    sandbox: danger-full-access
 
   test_executor:
     match:
@@ -535,7 +535,7 @@ agent_profiles:
     prompt_file: workflows/test-executor.md
     skills:
       - fskill-test-verify
-    sandbox: workspace-write
+    sandbox: danger-full-access
     network_access: true
 ```
 
@@ -578,7 +578,7 @@ prompt_hash: "..."
 skills:
   fskill-code-java-guide: b61341e
 model: "..."
-sandbox: workspace-write
+sandbox: danger-full-access
 ```
 
 运行过程中配置热更新不能改变已经启动的 Session。
@@ -599,8 +599,8 @@ sandbox: workspace-write
 - `WORKFLOW.md` 必须声明至少一个 Agent Profile，配置加载时严格校验唯一 Role 匹配、版本、Prompt 文件边界、Skill 名称、沙箱、网络策略、并发上限和最大 Turn 数；
 - Runner 在 Claim 前按 `WorkItem.agent_role` 精确路由，找不到或出现重复 Profile 时将任务置为 `Blocked`，不回退默认 Builder；
 - 每个 Profile 使用独立 Prompt，并将 Skill allowlist、Profile 身份和执行策略写入最终 Prompt；
-- Profile 沙箱和网络策略转换为独立 Codex `thread/start` / `turn/start` 参数，Review Profile 使用 `read-only`；
-- 调度器同时执行全局和 Profile 级并发限制，并在超过 `max_turns` 且未形成 Handoff 时停止 continuation；
+- Profile 沙箱和网络策略转换为独立 Codex `thread/start` / `turn/start` 参数；正式 v2 Profile 按部署授权统一使用 `danger-full-access`，Review 的只评不改约束由角色 Prompt 和 Handoff 协议执行；
+- 调度器同时执行全局和 Profile 级并发限制；普通 continuation 在同一 Attempt、Claim、Thread 和 App Server 进程内执行，超过 `max_turns` 且未形成 Handoff 时才阻断；
 - Claim 会原子登记 `agent_profiles` 版本，并把 Prompt SHA-256、Skill、模型、沙箱、网络和并发配置快照写入 `agent_attempts`；
 - 同名同版本配置发生变化时拒绝复用，保证热更新不改变已启动 Session，配置变化必须递增 Profile 版本；
 - 新增 Agent Profile 和 WorkItem Attempt 查询接口，执行历史可还原 Profile 版本和快照；
@@ -1008,6 +1008,37 @@ Codex 创建 Thread 和 Turn 后立即更新 Attempt 上下文，不能只在 Wo
   Needs Human 原 Thread 恢复、事件鉴权/排序/脱敏和 Reasoning 排除；本地托管 Runner
   启动、注册、心跳、停止冒烟验证通过。
 
+### 11.5 Symphony SPEC 对齐任务（2026-08-04）
+
+在继续扩展研发角色和外部 Issue Provider 前，先完成当前 `openai/symphony` SPEC 的
+核心运行语义。看板只表达 WorkItem 的宏观工作流状态；Turn、工具调用和子 Agent 属于
+Attempt 内部执行过程，不驱动 WorkItem 在 `Running`、`RetryQueued`、`Ready` 之间抖动。
+
+| ID | 状态 | 任务 | 完成标准 |
+|---|---|---|---|
+| SPEC-001 | 已完成 | 单 Attempt 多 Turn | 同一 Claim、Attempt、Thread 和 App Server 进程内连续执行多个 Turn；未交付时 WorkItem 保持 `Running` |
+| SPEC-002 | 待开始 | Active Run Reconciliation 与 Workspace 清理 | 每个 Tick 刷新运行中 WorkItem；终态停止执行、调用 `before_remove` 并安全清理 Workspace |
+| SPEC-003 | 待开始 | `WORKFLOW.md` 热更新 | 文件变化后重新校验并应用；无效版本不影响上一份有效配置和在途执行 |
+| SPEC-004 | 待开始 | Token、Rate Limit、Turn Count 和结构化日志 | 运行态记录 Session、Turn 数、Token、Rate Limit、运行时长和带上下文字段的结构化日志 |
+| SPEC-005 | 待开始 | Tracker、CLI 和 API 标准兼容层 | 补齐 state/ID Tracker 读取、标准配置字段、默认 Workflow 路径和 `/api/v1` 兼容接口 |
+
+`SPEC-001` 的 Attempt 只在交付、Needs Human、Blocked、取消、真实失败或达到执行上限时
+结束。普通 Turn 完成只触发同一 Thread 的下一 Turn，不释放 Claim，也不创建新 Attempt。
+
+`SPEC-001` 已实现并通过真实子进程协议集成测试：第一个 Turn 未交付时，同一 App
+Server 进程接收第二个 `turn/start`，复用 Thread、Claim、Attempt 和 Workspace；第二
+个 Turn 交付后只产生一个 Attempt，WorkItem 全程未进入 `RetryQueued`。达到 Profile
+`max_turns` 时才以 `max_turns_exceeded` 阻断，真实异常仍使用独立重试 Attempt。若
+Attempt 因 Needs Human 结束，人工回复后的新 Claim 会携带全部已解决决策，并把问题、
+选项和回复作为权威上下文注入恢复 Turn，避免 Agent 在后续 Blocked、
+Retry 或新会话中丢失结论或重复询问。Needs Human 与 Retry 复用原 Thread；环境类
+Blocked 解阻后启动新 Thread，避免沿用已经固化错误运行根的旧 Session。
+
+Thread 必须把当前 WorkItem Workspace 的规范化绝对路径显式写入
+`runtimeWorkspaceRoots`，`workspaceWrite` Turn 同时写入
+`sandboxPolicy.writableRoots`。不能只依赖 `cwd` 隐式推断，否则 Codex App Server 可能
+把受管 Workspace 判定为 project 外部并拒绝 `apply_patch`，或拒绝 Shell 写入。
+
 ---
 
 ## 12. 第十一步：扩展完整研发链路
@@ -1106,6 +1137,11 @@ PRD
 | RUN-003 | Agent Runtime 查询与状态映射 | P0 | RUN-002 |
 | RUN-004 | Windows 本地 Runner Supervisor | P1 | RUN-001 |
 | RUN-005 | Agent 状态中心与 Runner 控制 UI | P1 | RUN-003、RUN-004 |
+| SPEC-001 | 单 Attempt 多 Turn，保持会话和 Running 稳定 | P0 | RUN-002 |
+| SPEC-002 | Active Run Reconciliation 和 Workspace 清理 | P0 | SPEC-001 |
+| SPEC-003 | WORKFLOW.md 动态热更新 | P0 | SPEC-002 |
+| SPEC-004 | Token、Rate Limit、Turn Count 和结构化日志 | P1 | SPEC-001 |
+| SPEC-005 | Tracker、CLI、API 标准兼容层 | P1 | SPEC-002、SPEC-003、SPEC-004 |
 | HARD-001 | 权限和秘密隔离 | P0 | SYM-004 |
 | HARD-002 | 重启恢复测试 | P0 | ACP-003 |
 | HARD-003 | 并发 Claim 测试 | P0 | ACP-003 |
@@ -1125,7 +1161,8 @@ PRD
 截至 2026-08-04，协议、控制面、Windows Runner、Profile/Skill、端到端验证、最小
 UI 以及 `WFL-001` 至 `WFL-005` 已完成。本期先完成 `INT-001` 手工录入 API、
 `INT-002` UI 创建与拆分预览，再完成 `RUN-001` 至 `RUN-005` 的 Runner/Agent
-运行闭环；`INT-003` 外部 Issue 导入延期。
+运行闭环；下一阶段按 `SPEC-001` 至 `SPEC-005` 完成 Symphony SPEC 对齐，之后再扩展
+完整研发角色；`INT-003` 外部 Issue 导入延期。
 
 第一阶段完成标志不是“看板能打开”，而是可以用固定 Schema 和 API 人工走通：
 

@@ -65,7 +65,7 @@ skill_repository:
 
 agent_profiles:
   solution_architect:
-    version: 1
+    version: 2
     match:
       agent_role: solution_architect
     prompt_file: workflows/solution-architect.md
@@ -73,13 +73,13 @@ agent_profiles:
       - fskill-analysis-tech
       - fskill-knowledge-query
       - fskill-tools-db
-    sandbox: workspace-write
+    sandbox: danger-full-access
     network_access: false
     max_concurrent_agents: 2
     max_turns: 10
 
   backend_builder:
-    version: 1
+    version: 2
     match:
       agent_role: backend_builder
     prompt_file: workflows/backend-builder.md
@@ -87,43 +87,43 @@ agent_profiles:
       - fskill-code-java-guide
       - fskill-knowledge-query
       - fskill-tools-db
-    sandbox: workspace-write
+    sandbox: danger-full-access
     network_access: true
     max_concurrent_agents: 4
     max_turns: 20
 
   code_reviewer:
-    version: 1
+    version: 2
     match:
       agent_role: code_reviewer
     prompt_file: workflows/code-reviewer.md
     skills:
       - fskill-code-review
-    sandbox: read-only
+    sandbox: danger-full-access
     network_access: false
     max_concurrent_agents: 3
     max_turns: 10
 
   test_designer:
-    version: 1
+    version: 2
     match:
       agent_role: test_designer
     prompt_file: workflows/test-designer.md
     skills:
       - fskill-test-explore
-    sandbox: workspace-write
+    sandbox: danger-full-access
     network_access: false
     max_concurrent_agents: 2
     max_turns: 10
 
   test_executor:
-    version: 1
+    version: 2
     match:
       agent_role: test_executor
     prompt_file: workflows/test-executor.md
     skills:
       - fskill-test-verify
-    sandbox: workspace-write
+    sandbox: danger-full-access
     network_access: true
     max_concurrent_agents: 2
     max_turns: 15

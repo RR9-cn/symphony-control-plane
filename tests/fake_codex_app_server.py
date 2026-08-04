@@ -83,13 +83,13 @@ def main() -> int:
     )
 
     mode = os.getenv("FAKE_CODEX_MODE")
-    state_path = (
-        Path(os.environ["FAKE_CODEX_STATE_FILE"]) if mode == "continuation" else None
-    )
-    is_resumed = mode == "resume" or (state_path is not None and state_path.exists())
+    is_resumed = mode == "resume"
     thread = read_message()
     assert thread["method"] == ("thread/resume" if is_resumed else "thread/start")
     assert thread["params"]["sandbox"] == "workspace-write"
+    assert thread["params"]["runtimeWorkspaceRoots"] == [
+        str(Path.cwd().resolve())
+    ]
     if is_resumed:
         assert thread["params"]["threadId"] == "thread-test"
     else:
@@ -114,9 +114,16 @@ def main() -> int:
     assert "fskill-analysis-tech" in turn["params"]["input"][0]["text"]
     if is_resumed:
         assert "Continue the existing WorkItem" in turn["params"]["input"][0]["text"]
+        assert "resolved_human_decisions" in turn["params"]["input"][0]["text"]
+        assert (
+            '"question": "Approve the compatibility decision?"'
+            in turn["params"]["input"][0]["text"]
+        )
+        assert '"response": "approve"' in turn["params"]["input"][0]["text"]
     assert turn["params"]["sandboxPolicy"] == {
         "type": "workspaceWrite",
         "networkAccess": False,
+        "writableRoots": [str(Path.cwd().resolve())],
     }
     send({"id": turn["id"], "result": {"turn": {"id": "turn-test"}}})
     send(
@@ -139,16 +146,41 @@ def main() -> int:
         }
     )
 
-    if mode == "continuation" and not is_resumed:
-        assert state_path is not None
-        state_path.write_text("resume", encoding="utf-8")
+    if mode in {"continuation", "exhaust"}:
         send(
             {
                 "method": "turn/completed",
                 "params": {"turn": {"id": "turn-test"}},
             }
         )
-        return 0
+        continuation = read_message()
+        assert continuation["method"] == "turn/start"
+        assert continuation["params"]["threadId"] == "thread-test"
+        continuation_prompt = continuation["params"]["input"][0]["text"]
+        assert "Continue working on WorkItem WI-001" in continuation_prompt
+        assert "same live session" in continuation_prompt
+        send(
+            {
+                "id": continuation["id"],
+                "result": {"turn": {"id": "turn-test-2"}},
+            }
+        )
+        send(
+            {
+                "method": "turn/started",
+                "params": {
+                    "turn": {"id": "turn-test-2", "status": "inProgress"}
+                },
+            }
+        )
+        if mode == "exhaust":
+            send(
+                {
+                    "method": "turn/completed",
+                    "params": {"turn": {"id": "turn-test-2"}},
+                }
+            )
+            return 0
 
     if mode == "fail":
         send(

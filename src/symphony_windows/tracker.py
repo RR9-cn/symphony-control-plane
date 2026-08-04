@@ -4,7 +4,7 @@ import json
 import os
 import re
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import quote
@@ -37,6 +37,7 @@ class ClaimLease:
     token: str
     attempt: dict[str, Any] | None = None
     resume_thread_id: str | None = None
+    resume_decisions: list[dict[str, Any]] = field(default_factory=list)
     continuation_turn_count: int = 0
     active: bool = True
 
@@ -126,6 +127,7 @@ class ControlPlaneTracker:
         token = payload.get("claim_token")
         attempt = payload.get("attempt")
         resume_thread_id = payload.get("resume_thread_id")
+        resume_decisions = payload.get("resume_decisions", [])
         continuation_turn_count = payload.get("continuation_turn_count", 0)
         if (
             not isinstance(claimed, dict)
@@ -133,6 +135,8 @@ class ControlPlaneTracker:
             or not token
             or not isinstance(attempt, dict)
             or (resume_thread_id is not None and not isinstance(resume_thread_id, str))
+            or not isinstance(resume_decisions, list)
+            or not all(isinstance(decision, dict) for decision in resume_decisions)
             or not isinstance(continuation_turn_count, int)
             or continuation_turn_count < 0
         ):
@@ -144,6 +148,7 @@ class ControlPlaneTracker:
             token=token,
             attempt=attempt,
             resume_thread_id=resume_thread_id,
+            resume_decisions=resume_decisions,
             continuation_turn_count=continuation_turn_count,
         )
 

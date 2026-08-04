@@ -65,14 +65,14 @@ HEAD 检出该 commit 并核对实际 HEAD。Continuation、NeedsHuman 恢复和
 ```yaml
 agent_profiles:
   backend_builder:
-    version: 1
+    version: 2
     match:
       agent_role: backend_builder
     prompt_file: workflows/backend-builder.md
     skills:
       - fskill-code-java-guide
       - fskill-knowledge-query
-    sandbox: workspace-write
+    sandbox: danger-full-access
     network_access: true
     max_concurrent_agents: 4
     max_turns: 20
@@ -92,6 +92,12 @@ effort / sandbox / network_access / max_concurrent_agents / max_turns
 `danger-full-access`；未配置 `codex.thread_sandbox` 或
 `codex.turn_sandbox_policy` 时也默认使用完全访问。需要收紧角色权限时，应在
 Profile 中显式设置 `workspace-write` 或 `read-only`，Profile 配置优先于全局默认值。
+
+当前正式 `WORKFLOW.md` 根据部署方授权将五个 Profile 统一设置为
+`danger-full-access`（v2）。原因是 Windows Codex App Server 0.146.0 会把
+`apply_patch` 实现为 PowerShell 管道命令；该命令在 `workspaceWrite + never` 下被归类为
+需要审批的 unknown action，无法无人值守落盘。Workspace 隔离、角色 Prompt、动态工具、
+凭据剥离以及 push/merge 人工门禁仍然生效。
 
 同一 Profile 名称和版本若出现不同快照会作为配置冲突阻断执行，配置变更必须递增版本。可通过以下接口还原执行历史：
 
@@ -169,9 +175,16 @@ Running → NeedsHuman（清除 Claim）
 → GET /api/work-items/{id}/decisions
 → 人工 resolve decision
 → Ready → Runner 重新领取
+→ Claim 返回全部已解决决策 → Runner 注入恢复 Turn
 ```
 
-因此 Agent 不会在 Codex Turn 内持续等待用户输入。
+因此 Agent 不会在 Codex Turn 内持续等待用户输入，也不会只依赖 Codex Thread 历史来
+猜测人工回复；即使 Thread 恢复失败并创建新会话，决策上下文仍随 Claim 交付。
+Needs Human 与 Retry 恢复复用原 Thread；Blocked 解阻后启动新 Thread，并通过 Claim
+重新注入全部已解决决策。Runner 会在 Thread start/resume 时显式设置当前 Workspace 的
+绝对 `runtimeWorkspaceRoots`；对于 `workspace-write` Profile，还会在
+每个 Turn 设置相同的绝对 `writableRoots`，确保补丁和命令写入只发生在该 WorkItem 的
+隔离目录内。
 
 ## 启动
 
@@ -239,7 +252,7 @@ fshows-symphony-windows .\WORKFLOW.md
 8. 以 Profile Prompt、模型、沙箱和网络策略启动独立 `codex app-server`，并注册六个受限工具；
 9. 后台 Heartbeat，Claim 丢失时终止 Codex 进程树；
 10. 完成、Blocked 或 NeedsHuman 时清除本机 Claim；
-11. 普通 Turn 结束但未交接时安排 1 秒 continuation；达到 Profile `max_turns` 后阻断，异常按 10 秒指数退避；
+11. 普通 Turn 结束但未交接时，在同一 Attempt、Claim、Thread 和 App Server 进程内直接启动下一 Turn，WorkItem 保持 `Running`；达到 Profile `max_turns` 后阻断，真实异常才按 10 秒指数退避；
 12. 执行 `after_run` Hook，保留工作区供下一次尝试复用。
 
 Codex 执行期间，Runner 会把 App Server 的结构化事件绑定到当前 Attempt：Turn、

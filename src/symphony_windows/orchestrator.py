@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -245,6 +246,21 @@ class WindowsSymphony:
                     "restart discovery. Finish the remaining scoped work and handoff.\n\n"
                     + prompt
                 )
+            if lease.resume_decisions:
+                decisions = json.dumps(
+                    lease.resume_decisions,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                prompt = (
+                    "The following resolved human decisions are authoritative context "
+                    "for this recovery attempt. Apply all of them directly and do not "
+                    "ask the same questions again unless new contradictory evidence "
+                    "appears.\n"
+                    f"<resolved_human_decisions>{decisions}"
+                    "</resolved_human_decisions>\n\n"
+                    + prompt
+                )
             codex = self.codex_factory(
                 profile.codex_config(self.workflow.codex),
                 secret_environment_names=tuple(
@@ -265,6 +281,7 @@ class WindowsSymphony:
                     self.tracker,
                     lease,
                     resume_thread_id=lease.resume_thread_id,
+                    max_turns=profile.max_turns,
                 )
             )
             heartbeat_task = asyncio.create_task(self._heartbeat_loop(lease))
@@ -285,35 +302,24 @@ class WindowsSymphony:
                 await heartbeat_task
 
             if result.status == "turn_completed" and lease.active:
-                turns = lease.continuation_turn_count + 1
-                if turns >= profile.max_turns:
-                    await self.tracker.execute_tool(
-                        lease,
-                        "work_item_block",
-                        {
-                            "code": "max_turns_exceeded",
-                            "message": (
-                                f"Profile {profile.name} reached max_turns="
-                                f"{profile.max_turns} without completing a handoff."
-                            ),
-                        },
-                    )
-                    self._retry_attempts.pop(item_id, None)
-                    return AttemptOutcome(
-                        item_id=item_id,
-                        status="max_turns_exceeded",
-                        thread_id=result.thread_id,
-                        turn_id=result.turn_id,
-                    )
-                await self.tracker.release(
+                blocked = await self.tracker.execute_tool(
                     lease,
-                    "codex_turn_completed_without_handoff",
-                    retry_delay_seconds=1,
-                    thread_id=result.thread_id,
+                    "work_item_block",
+                    {
+                        "code": "max_turns_exceeded",
+                        "message": (
+                            f"Profile {profile.name} completed "
+                            f"{result.turn_count} turns in one Attempt without "
+                            "creating a workflow handoff."
+                        ),
+                    },
                 )
+                if not blocked.response["success"]:
+                    raise TrackerError("failed to record max_turns_exceeded blocker")
+                self._retry_attempts.pop(item_id, None)
                 return AttemptOutcome(
                     item_id=item_id,
-                    status="continuation_queued",
+                    status="max_turns_exceeded",
                     thread_id=result.thread_id,
                     turn_id=result.turn_id,
                 )

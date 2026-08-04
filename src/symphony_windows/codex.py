@@ -29,6 +29,7 @@ class CodexRunResult:
     status: str
     thread_id: str
     turn_id: str
+    turn_count: int = 1
 
 
 EventHandler = Callable[[dict[str, Any]], Awaitable[None] | None]
@@ -58,7 +59,10 @@ class CodexAppServer:
         tracker: ControlPlaneTracker,
         lease: ClaimLease,
         resume_thread_id: str | None = None,
+        max_turns: int = 1,
     ) -> CodexRunResult:
+        if max_turns < 1:
+            raise CodexError("max_turns must be positive")
         await self._start(workspace)
         thread_id = ""
         turn_id = ""
@@ -71,20 +75,38 @@ class CodexAppServer:
                 resume_thread_id=resume_thread_id,
             )
             await tracker.update_attempt_context(lease, thread_id=thread_id)
-            turn_id = await self._start_turn(workspace, prompt, issue, thread_id)
-            await tracker.update_attempt_context(
-                lease, thread_id=thread_id, turn_id=turn_id
-            )
-            try:
-                status = await asyncio.wait_for(
-                    self._receive_turn(tracker, lease, thread_id),
-                    timeout=self.config.turn_timeout_ms / 1000,
+            turn_count = 0
+            status = "turn_completed"
+            while lease.active and turn_count < max_turns:
+                turn_prompt = (
+                    prompt
+                    if turn_count == 0
+                    else _continuation_prompt(issue, turn_count + 1, max_turns)
                 )
-            except TimeoutError as error:
-                raise CodexError(
-                    f"Codex turn exceeded {self.config.turn_timeout_ms}ms"
-                ) from error
-            return CodexRunResult(status=status, thread_id=thread_id, turn_id=turn_id)
+                turn_id = await self._start_turn(
+                    workspace, turn_prompt, issue, thread_id
+                )
+                turn_count += 1
+                await tracker.update_attempt_context(
+                    lease, thread_id=thread_id, turn_id=turn_id
+                )
+                try:
+                    status = await asyncio.wait_for(
+                        self._receive_turn(tracker, lease, thread_id),
+                        timeout=self.config.turn_timeout_ms / 1000,
+                    )
+                except TimeoutError as error:
+                    raise CodexError(
+                        f"Codex turn exceeded {self.config.turn_timeout_ms}ms"
+                    ) from error
+                if status != "turn_completed":
+                    break
+            return CodexRunResult(
+                status=status,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                turn_count=turn_count,
+            )
         finally:
             await self.stop()
 
@@ -218,10 +240,12 @@ class CodexAppServer:
         if resume_thread_id is not None:
             logger.info("resuming Codex thread %s", resume_thread_id)
             return await self._resume_thread(workspace, resume_thread_id)
+        workspace_root = str(workspace.resolve())
         params: dict[str, Any] = {
             "approvalPolicy": self.config.approval_policy,
             "sandbox": self.config.thread_sandbox,
-            "cwd": str(workspace),
+            "cwd": workspace_root,
+            "runtimeWorkspaceRoots": [workspace_root],
             "dynamicTools": tracker.tool_specs(),
         }
         if self.config.model is not None:
@@ -239,11 +263,13 @@ class CodexAppServer:
         return thread_id
 
     async def _resume_thread(self, workspace: Path, thread_id: str) -> str:
+        workspace_root = str(workspace.resolve())
         params: dict[str, Any] = {
             "threadId": thread_id,
             "approvalPolicy": self.config.approval_policy,
             "sandbox": self.config.thread_sandbox,
-            "cwd": str(workspace),
+            "cwd": workspace_root,
+            "runtimeWorkspaceRoots": [workspace_root],
         }
         if self.config.model is not None:
             params["model"] = self.config.model
@@ -262,13 +288,16 @@ class CodexAppServer:
         thread_id: str,
     ) -> str:
         identifier = issue.get("identifier") or issue.get("id")
+        sandbox_policy = dict(self.config.turn_sandbox_policy)
+        if sandbox_policy.get("type") == "workspaceWrite":
+            sandbox_policy["writableRoots"] = [str(workspace.resolve())]
         params: dict[str, Any] = {
             "threadId": thread_id,
             "input": [{"type": "text", "text": prompt}],
             "cwd": str(workspace),
             "title": f"{identifier}: {issue.get('title', '')}",
             "approvalPolicy": self.config.approval_policy,
-            "sandboxPolicy": self.config.turn_sandbox_policy,
+            "sandboxPolicy": sandbox_policy,
         }
         if self.config.effort is not None:
             params["effort"] = self.config.effort
@@ -442,6 +471,21 @@ class CodexAppServer:
         if stderr:
             suffix += f": {stderr[-2000:]}"
         return prefix + suffix
+
+
+def _continuation_prompt(
+    issue: dict[str, Any], turn_number: int, max_turns: int
+) -> str:
+    identifier = issue.get("identifier") or issue.get("id") or "current WorkItem"
+    return (
+        f"Continue working on WorkItem {identifier} in this same live session "
+        f"(turn {turn_number} of {max_turns}). The previous turn ended without "
+        "a workflow handoff. Reuse the analysis, file changes, and sub-agent "
+        "results already present in this thread and workspace; do not restart "
+        "discovery. Complete the remaining scoped work, validate it, and call "
+        "the appropriate Control Plane tool to hand off, request human input, "
+        "or record a blocker."
+    )
 
 
 _APPROVAL_METHODS = {

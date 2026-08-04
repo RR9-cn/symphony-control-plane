@@ -28,7 +28,7 @@ roles:
       - fskill-analysis-tech
       - fskill-knowledge-query
       - fskill-tools-db
-    sandbox: workspace-write
+    sandbox: danger-full-access
     network_access: false
     business_code_write: false
     completion_conditions:
@@ -56,7 +56,7 @@ roles:
       - fskill-code-java-guide
       - fskill-knowledge-query
       - fskill-tools-db
-    sandbox: workspace-write
+    sandbox: danger-full-access
     network_access: true
     business_code_write: true
     completion_conditions:
@@ -83,7 +83,7 @@ roles:
       - orchestration/handoffs/**
     skills:
       - fskill-code-review
-    sandbox: workspace-write
+    sandbox: danger-full-access
     network_access: false
     business_code_write: false
     completion_conditions:
@@ -110,7 +110,7 @@ roles:
       - orchestration/handoffs/**
     skills:
       - fskill-test-explore
-    sandbox: workspace-write
+    sandbox: danger-full-access
     network_access: false
     business_code_write: false
     completion_conditions:
@@ -135,7 +135,7 @@ roles:
       - orchestration/handoffs/**
     skills:
       - fskill-test-verify
-    sandbox: workspace-write
+    sandbox: danger-full-access
     network_access: true
     business_code_write: false
     completion_conditions:

@@ -610,6 +610,71 @@ async def test_stage_rework_claim_resumes_completed_codex_thread(api) -> None:
     assert reclaimed.json()["continuation_turn_count"] == 0
 
 
+async def test_blocker_resolution_claim_starts_a_fresh_codex_thread(api) -> None:
+    await create_fixture(api, work_item_payload("WI-001", status="ready"))
+    profile = {
+        "name": "solution_architect",
+        "version": 1,
+        "config": {
+            "profile_name": "solution_architect",
+            "profile_version": 1,
+        },
+    }
+    claimed = await api.post(
+        "/api/work-items/WI-001/claim",
+        json={
+            "worker_id": "windows-runner",
+            "expected_version": 1,
+            "lease_seconds": 60,
+            "profile": profile,
+        },
+    )
+    token = claimed.json()["claim_token"]
+    context = await api.post(
+        "/api/work-items/WI-001/attempt-context",
+        json={
+            "claimToken": token,
+            "threadId": "thread-blocked",
+            "turnId": "turn-blocked",
+        },
+    )
+    assert context.status_code == 200, context.text
+    blocked = await api.post(
+        "/api/work-items/WI-001/status",
+        json={
+            "to_status": "blocked",
+            "event": "work_item_blocked",
+            "claim_token": token,
+            "payload": {
+                "thread_id": "thread-blocked",
+                "blocker": {"code": "workspace_write", "message": "denied"},
+            },
+        },
+    )
+    assert blocked.status_code == 200, blocked.text
+    readied = await api.post(
+        "/api/work-items/WI-001/status",
+        json={
+            "to_status": "ready",
+            "event": "blocker_resolved",
+            "actor_type": "control_plane",
+            "payload": {"resolution": "writable root fixed"},
+        },
+    )
+    assert readied.status_code == 200, readied.text
+    reclaimed = await api.post(
+        "/api/work-items/WI-001/claim",
+        json={
+            "worker_id": "windows-runner",
+            "expected_version": readied.json()["version"],
+            "lease_seconds": 60,
+            "profile": profile,
+        },
+    )
+    assert reclaimed.status_code == 200, reclaimed.text
+    assert reclaimed.json()["resume_thread_id"] is None
+
+
 async def test_expired_lease_is_retried_and_old_token_is_revoked(api) -> None:
     await create_fixture(api, work_item_payload("WI-001", status="ready"))
     response = await api.post(
@@ -700,6 +765,60 @@ async def test_human_decision_releases_claim_and_resumes_ready(api) -> None:
         for event in (await api.get("/api/work-items/WI-001/events")).json()
     ]
     assert event_types[-2:] == ["human_input_requested", "human_decision_resolved"]
+
+    reclaimed = await api.post(
+        "/api/work-items/WI-001/claim",
+        json={
+            "worker_id": "worker-b",
+            "expected_version": resumed["version"],
+            "lease_seconds": 60,
+        },
+    )
+    assert reclaimed.status_code == 200, reclaimed.text
+    resume_decisions = reclaimed.json()["resume_decisions"]
+    assert len(resume_decisions) == 1
+    resume_decision = resume_decisions[0]
+    assert resume_decision["id"] == resolved.json()["id"]
+    assert resume_decision["question"] == "Choose cursor format"
+    assert resume_decision["options"] == ["opaque", "plain"]
+    assert resume_decision["response"] == "opaque"
+    assert resume_decision["resolved_by"] == "human-1"
+
+    second_requested = await api.post(
+        "/api/work-items/WI-001/decisions",
+        json={
+            "action": "request",
+            "question": "Choose page size",
+            "options": ["20", "50"],
+            "actor_id": "agent-2",
+            "claim_token": reclaimed.json()["claim_token"],
+        },
+    )
+    assert second_requested.status_code == 200, second_requested.text
+    second_resolved = await api.post(
+        "/api/work-items/WI-001/decisions",
+        json={
+            "action": "resolve",
+            "decision_id": second_requested.json()["id"],
+            "response": "50",
+            "actor_id": "human-1",
+        },
+    )
+    assert second_resolved.status_code == 200, second_resolved.text
+    ready_again = (await api.get("/api/work-items/WI-001")).json()
+    claimed_again = await api.post(
+        "/api/work-items/WI-001/claim",
+        json={
+            "worker_id": "worker-c",
+            "expected_version": ready_again["version"],
+            "lease_seconds": 60,
+        },
+    )
+    assert claimed_again.status_code == 200, claimed_again.text
+    assert [
+        decision["response"]
+        for decision in claimed_again.json()["resume_decisions"]
+    ] == ["opaque", "50"]
 
 
 async def test_stage_review_can_request_human_and_dependency_cycles_are_rejected(

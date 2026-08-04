@@ -509,6 +509,16 @@ class ControlPlaneService:
                 .order_by(AgentAttempt.attempt_number.desc())
                 .limit(1)
             )
+            resume_decisions = (
+                await self.session.scalars(
+                    select(HumanDecision)
+                    .where(
+                        HumanDecision.work_item_id == item_id,
+                        HumanDecision.status == "resolved",
+                    )
+                    .order_by(HumanDecision.created_at, HumanDecision.id)
+                )
+            ).all()
             attempt_number = (
                 previous_attempt.attempt_number + 1
                 if previous_attempt is not None
@@ -568,6 +578,9 @@ class ControlPlaneService:
             claim_token=token,
             attempt=AgentAttemptView.model_validate(attempt),
             resume_thread_id=resume_thread_id,
+            resume_decisions=[
+                DecisionView.model_validate(decision) for decision in resume_decisions
+            ],
             continuation_turn_count=continuation_turn_count,
         )
 
