@@ -1,0 +1,149 @@
+schema_version: 1
+
+global_guards:
+  require_human_authorization:
+    - git_push
+    - merge
+    - release
+    - external_bulk_write
+    - destructive_cleanup
+  forbidden_for_all_roles:
+    - expose_host_credentials_to_agent
+    - depend_on_uncommitted_previous_workspace
+
+roles:
+  solution_architect:
+    stage: tech_analysis
+    description: 读取需求、设计和源码，形成模块技术分析；不修改业务代码。
+    reads:
+      - prd/**
+      - analysis/**
+      - ddl/**
+      - task-split/**
+      - source/**
+    writes:
+      - tech-analysis/**
+      - orchestration/handoffs/**
+    skills:
+      - fskill-analysis-tech
+      - fskill-knowledge-query
+      - fskill-tools-db
+    sandbox: workspace-write
+    network_access: false
+    business_code_write: false
+    completion_conditions:
+      - 技术分析覆盖目标模块、边界、接口、数据流和风险。
+      - 所有输入都记录路径和不可变 revision。
+      - 生成通过 Schema 校验的 Handoff。
+    human_confirmation_triggers:
+      - 需求、DDL 与 Task Split 存在无法自行消解的冲突。
+      - 需要选择会改变公开接口、数据兼容性或安全边界的方案。
+
+  backend_builder:
+    stage: implementation
+    description: 按已批准技术分析实现后端代码和测试，不执行外部发布动作。
+    reads:
+      - prd/**
+      - ddl/**
+      - task-split/**
+      - tech-analysis/**
+      - source/**
+    writes:
+      - source/**
+      - test/**
+      - orchestration/handoffs/**
+    skills:
+      - fskill-code-java-guide
+      - fskill-knowledge-query
+      - fskill-tools-db
+    sandbox: workspace-write
+    network_access: true
+    business_code_write: true
+    completion_conditions:
+      - 实现满足工作项 acceptance_criteria。
+      - 目标构建、静态检查和测试通过，或失败证据已记录为 blocker。
+      - 代码 revision 和生成的 Artifact 已登记。
+      - 生成通过 Schema 校验的 Handoff。
+    human_confirmation_triggers:
+      - 实现需要突破 acceptance_criteria 或已批准技术方案。
+      - 需要 git push、合并、发布、生产凭据或破坏性数据操作。
+
+  code_reviewer:
+    stage: code_review
+    description: 对标准符合性和需求符合性进行只读评审，只写评审产物。
+    reads:
+      - prd/**
+      - ddl/**
+      - task-split/**
+      - tech-analysis/**
+      - source/**
+      - test/**
+    writes:
+      - reviews/**
+      - orchestration/handoffs/**
+    skills:
+      - fskill-code-review
+    sandbox: workspace-write
+    network_access: false
+    business_code_write: false
+    completion_conditions:
+      - 生成 Standards 与 Spec 双轴评审报告。
+      - 所有发现包含严重级别、证据位置和建议处置。
+      - HIGH 发现将工作项送入 rework，而不是直接修改源码。
+      - 生成通过 Schema 校验的 Handoff。
+    human_confirmation_triggers:
+      - 是否接受高风险技术债需要责任人裁决。
+      - 评审证据不足以区分需求问题与实现问题。
+
+  test_designer:
+    stage: test_design
+    description: 基于需求、分析、实现和评审结果设计测试方案，不修改业务代码。
+    reads:
+      - prd/**
+      - ddl/**
+      - task-split/**
+      - tech-analysis/**
+      - source/**
+      - reviews/**
+    writes:
+      - test/plans/**
+      - orchestration/handoffs/**
+    skills:
+      - fskill-test-explore
+    sandbox: workspace-write
+    network_access: false
+    business_code_write: false
+    completion_conditions:
+      - 测试方案覆盖 acceptance_criteria、边界、失败和回归场景。
+      - 每个场景定义前置条件、步骤、不可替代断言和预期结果。
+      - 生成通过 Schema 校验的 Handoff。
+    human_confirmation_triggers:
+      - 测试环境或数据方案可能影响共享资源。
+      - acceptance_criteria 不可验证或存在相互冲突。
+
+  test_executor:
+    stage: test_execution
+    description: 严格执行测试方案，可修改测试与 Harness，不修改业务实现。
+    reads:
+      - prd/**
+      - task-split/**
+      - source/**
+      - reviews/**
+      - test/**
+    writes:
+      - test/**
+      - orchestration/handoffs/**
+    skills:
+      - fskill-test-verify
+    sandbox: workspace-write
+    network_access: true
+    business_code_write: false
+    completion_conditions:
+      - 测试方案中的场景均有执行结果和证据。
+      - 未降低或删除不可替代断言。
+      - 业务代码缺陷返回 backend_builder，不在本角色内修复。
+      - 成功结果进入人工确认，确认后才可完成。
+      - 生成通过 Schema 校验的 Handoff。
+    human_confirmation_triggers:
+      - 测试全部通过，等待人工最终验收。
+      - 需要访问共享环境、敏感测试数据或外部写接口。

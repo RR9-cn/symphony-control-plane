@@ -1,0 +1,25 @@
+schema_version: 1
+work_item_id: WI-002
+attempt: 2
+agent_role: backend_builder
+result: completed
+inputs:
+  - path: tech-analysis/catalog-list.md
+    revision: rev-tech-001
+  - path: task-split/api-spec.md
+    revision: rev-api-001
+outputs:
+  - path: test/results/WI-002.md
+    revision: rev-build-test-001
+decisions:
+  inherited:
+    - id: DEC-001
+      summary: 列表游标使用商品 ID 与更新时间的稳定组合键。
+  added: []
+validation:
+  - name: targeted-build-and-test
+    result: passed
+risks: []
+blockers: []
+recommended_next_role: code_reviewer
+completed_at: '2026-08-03T01:42:00Z'

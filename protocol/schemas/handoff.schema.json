@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fshows.local/schemas/handoff.schema.json",
+  "title": "Fshows Agent Handoff",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "work_item_id",
+    "attempt",
+    "agent_role",
+    "result",
+    "inputs",
+    "outputs",
+    "decisions",
+    "validation",
+    "risks",
+    "blockers",
+    "recommended_next_role",
+    "completed_at"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "work_item_id": { "type": "string", "pattern": "^WI-[0-9]{3,}$" },
+    "attempt": { "type": "integer", "minimum": 1 },
+    "agent_role": {
+      "enum": [
+        "solution_architect",
+        "backend_builder",
+        "code_reviewer",
+        "test_designer",
+        "test_executor"
+      ]
+    },
+    "result": { "enum": ["completed", "needs_human", "blocked", "failed"] },
+    "inputs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/revisionedArtifact" }
+    },
+    "outputs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/outputArtifact" }
+    },
+    "decisions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inherited", "added"],
+      "properties": {
+        "inherited": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/decision" }
+        },
+        "added": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/decision" }
+        }
+      }
+    },
+    "validation": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/validation" }
+    },
+    "risks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/finding" }
+    },
+    "blockers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/finding" }
+    },
+    "recommended_next_role": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "enum": [
+            "solution_architect",
+            "backend_builder",
+            "code_reviewer",
+            "test_designer",
+            "test_executor"
+          ]
+        }
+      ]
+    },
+    "completed_at": { "type": "string", "format": "date-time" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "result": { "const": "completed" } } },
+      "then": {
+        "properties": {
+          "outputs": { "minItems": 1 },
+          "blockers": { "maxItems": 0 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "result": { "const": "blocked" } } },
+      "then": { "properties": { "blockers": { "minItems": 1 } } }
+    }
+  ],
+  "$defs": {
+    "relativePath": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$"
+    },
+    "revisionedArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "revision"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativePath" },
+        "revision": { "type": "string", "minLength": 1 }
+      }
+    },
+    "outputArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativePath" },
+        "revision": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "summary"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^DEC-[0-9]{3,}$" },
+        "summary": { "type": "string", "minLength": 1 }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "result"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "result": { "enum": ["passed", "failed", "skipped"] },
+        "details": { "type": "string" }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["severity", "message"],
+      "properties": {
+        "severity": { "enum": ["low", "medium", "high", "critical"] },
+        "message": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

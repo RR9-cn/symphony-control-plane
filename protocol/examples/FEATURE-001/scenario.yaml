@@ -1,0 +1,53 @@
+schema_version: 1
+feature_id: FEATURE-001
+description: 五角色串行闭环，并覆盖 blocked、retry_queued、rework 与 needs_human 的恢复。
+expected_role_order:
+  - solution_architect
+  - backend_builder
+  - code_reviewer
+  - test_designer
+  - test_executor
+required_recovery_statuses:
+  - blocked
+  - retry_queued
+  - rework
+  - needs_human
+steps:
+  - { work_item_id: WI-001, from: draft, to: ready, event: work_item_readied }
+  - { work_item_id: WI-001, from: ready, to: running, event: claimed }
+  - { work_item_id: WI-001, from: running, to: blocked, event: work_item_blocked }
+  - { work_item_id: WI-001, from: blocked, to: ready, event: blocker_resolved }
+  - { work_item_id: WI-001, from: ready, to: running, event: claimed }
+  - { work_item_id: WI-001, from: running, to: stage_review, event: agent_completed }
+  - { work_item_id: WI-001, from: stage_review, to: done, event: stage_approved }
+
+  - { work_item_id: WI-002, from: draft, to: ready, event: work_item_readied }
+  - { work_item_id: WI-002, from: ready, to: running, event: claimed }
+  - { work_item_id: WI-002, from: running, to: retry_queued, event: retry_scheduled }
+  - { work_item_id: WI-002, from: retry_queued, to: ready, event: retry_due }
+  - { work_item_id: WI-002, from: ready, to: running, event: claimed }
+  - { work_item_id: WI-002, from: running, to: stage_review, event: agent_completed }
+  - { work_item_id: WI-002, from: stage_review, to: done, event: stage_approved }
+
+  - { work_item_id: WI-003, from: draft, to: ready, event: work_item_readied }
+  - { work_item_id: WI-003, from: ready, to: running, event: claimed }
+  - { work_item_id: WI-003, from: running, to: stage_review, event: agent_completed }
+  - { work_item_id: WI-003, from: stage_review, to: rework, event: stage_rejected }
+  - { work_item_id: WI-003, from: rework, to: ready, event: rework_queued }
+  - { work_item_id: WI-003, from: ready, to: running, event: claimed }
+  - { work_item_id: WI-003, from: running, to: stage_review, event: agent_completed }
+  - { work_item_id: WI-003, from: stage_review, to: done, event: stage_approved }
+
+  - { work_item_id: WI-004, from: draft, to: ready, event: work_item_readied }
+  - { work_item_id: WI-004, from: ready, to: running, event: claimed }
+  - { work_item_id: WI-004, from: running, to: stage_review, event: agent_completed }
+  - { work_item_id: WI-004, from: stage_review, to: done, event: stage_approved }
+
+  - { work_item_id: WI-005, from: draft, to: ready, event: work_item_readied }
+  - { work_item_id: WI-005, from: ready, to: running, event: claimed }
+  - { work_item_id: WI-005, from: running, to: stage_review, event: agent_completed }
+  - { work_item_id: WI-005, from: stage_review, to: needs_human, event: human_review_requested }
+  - { work_item_id: WI-005, from: needs_human, to: ready, event: human_decision_resolved }
+  - { work_item_id: WI-005, from: ready, to: running, event: claimed }
+  - { work_item_id: WI-005, from: running, to: stage_review, event: agent_completed }
+  - { work_item_id: WI-005, from: stage_review, to: done, event: stage_approved }

@@ -1,0 +1,27 @@
+schema_version: 1
+work_item_id: WI-003
+attempt: 2
+agent_role: code_reviewer
+result: completed
+inputs:
+  - path: tech-analysis/catalog-list.md
+    revision: rev-tech-001
+  - path: test/results/WI-002.md
+    revision: rev-build-test-001
+outputs:
+  - path: reviews/WI-003/report.md
+    revision: rev-review-002
+decisions:
+  inherited:
+    - id: DEC-001
+      summary: 列表游标使用商品 ID 与更新时间的稳定组合键。
+  added: []
+validation:
+  - name: standards-axis
+    result: passed
+  - name: spec-axis
+    result: passed
+risks: []
+blockers: []
+recommended_next_role: test_designer
+completed_at: '2026-08-03T02:08:00Z'

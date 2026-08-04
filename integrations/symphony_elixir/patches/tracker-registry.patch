@@ -1,0 +1,21 @@
+diff --git a/elixir/lib/symphony_elixir/tracker.ex b/elixir/lib/symphony_elixir/tracker.ex
+--- a/elixir/lib/symphony_elixir/tracker.ex
++++ b/elixir/lib/symphony_elixir/tracker.ex
+@@ -13,5 +13,6 @@ defmodule SymphonyElixir.Tracker do
+   @adapters %{
+     "asana" => SymphonyElixir.Asana.Adapter,
++    "fshows_control_plane" => SymphonyElixir.FshowsControlPlane.Adapter,
+     "github" => SymphonyElixir.GitHub.Adapter,
+     "gitlab" => SymphonyElixir.GitLab.Adapter,
+     "jira" => SymphonyElixir.Jira.Adapter,
+diff --git a/elixir/mix.exs b/elixir/mix.exs
+--- a/elixir/mix.exs
++++ b/elixir/mix.exs
+@@ -15,6 +15,7 @@ defmodule SymphonyElixir.MixProject do
+         ignore_modules: [
+           SymphonyElixir.Asana.Client,
+           SymphonyElixir.Config,
++          SymphonyElixir.FshowsControlPlane.Client,
+           SymphonyElixir.GitHub.Client,
+           SymphonyElixir.GitLab.Client,
+           SymphonyElixir.Jira.Client,
