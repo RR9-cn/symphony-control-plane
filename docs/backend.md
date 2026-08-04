@@ -34,6 +34,9 @@ POST   /api/features
 GET    /api/features
 GET    /api/features/{id}
 
+POST   /api/intake/manual/issues/preview
+POST   /api/intake/manual/issues
+
 POST   /api/work-items
 GET    /api/work-items
 GET    /api/work-items/candidates
@@ -57,6 +60,13 @@ GET    /api/agent-profiles
 POST   /api/maintenance/tick
 GET    /health
 ```
+
+手工 Issue Intake 接收 Feature ID、需求说明、验收标准、仓库地址、Base Branch 和
+完整 40 位 Git commit。本地仓库可先调用 `POST /api/repositories/resolve-head`，
+传入绝对路径读取当前 `HEAD`，避免用户手工复制 commit。该接口不访问远程仓库，
+也不接受相对路径。`preview` 只生成固定五阶段拆分草案，不写数据库；确认接口在一个
+事务中创建 Feature、五个串行依赖的 WorkItem 和审计事件，只把第一个
+Solution Architect 工作项置为 `ready`。本期不连接或同步外部 Issue 平台。
 
 `claim` 请求兼容协议示例中的 camelCase：
 

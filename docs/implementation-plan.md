@@ -889,17 +889,75 @@ Runner 的仓库契约从示例提升为可验证、可启动、可恢复的正�
 
 ---
 
-## 10. 第九步：扩展完整研发链路
+## 10. 第九步：手工 Issue Intake
+
+本期只支持用户在控制面手工录入 Issue。GitHub、Linear、云效等外部 Issue 导入、
+Webhook 和双向状态同步全部延期，不进入本期范围。
+
+### 10.1 录入字段
+
+- Feature ID、标题和需求描述；
+- 优先级；
+- 仓库地址或本机绝对路径；
+- Base Branch 和完整 40 位不可变 Git commit；
+- 一条或多条验收标准。
+
+### 10.2 拆分与确认
+
+第一版不启动 Task Planner Agent，而是使用确定性的
+`five_stage_backend_v1` 模板：
+
+```text
+Solution Architect（Ready）
+→ Backend Builder（Draft）
+→ Code Reviewer（Draft）
+→ Test Designer（Draft）
+→ Test Executor（Draft）
+```
+
+UI 必须先请求只读拆分预览，显示 WorkItem ID、Role、顺序和初始状态；用户确认后，
+控制面在单个 SQLite 事务中创建 Feature、五个 WorkItem、依赖和审计事件。重复
+Feature ID 或生成的 WorkItem ID 冲突时整体失败，不允许产生半条链路。
+
+### 10.3 完成标准
+
+- UI 可以手工录入 Issue；本地仓库自动读取 `HEAD`，远程仓库允许手工填写并校验
+  不可变 commit；
+- 拆分预览不写数据库；
+- 确认创建具有事务原子性；
+- 只有首个 WorkItem 是 Runner Candidate；
+- 五个角色、Stage 和依赖顺序与已冻结协议一致；
+- 自动化测试覆盖预览、创建、冲突和非法 commit；
+- 不包含任何外部 Issue Provider、凭据或同步任务。
+
+### 10.4 实现结果（2026-08-04）
+
+第九步手工 Issue Intake 已实现：
+
+- 新增手工 Issue 拆分预览与确认创建 API，预览无数据库写入；
+- 固定 `five_stage_backend_v1` 模板生成五个 Role/Stage 串行 WorkItem，仅技术分析
+  初始为 `Ready`；
+- 确认创建在单个 SQLite 事务中写入 Feature、WorkItem、依赖和来源审计事件；
+- 手工录入强制完整 40 位 Git commit，与正式 `WORKFLOW.md` 的 detached checkout
+  规则一致；
+- 管理看板新增录入表单、五阶段拆分预览和确认创建操作；
+- 自动化测试覆盖预览无副作用、成功创建、重复创建、生成 ID 冲突原子回滚和非法
+  commit；
+- 本期没有新增外部 Issue Provider、Webhook、凭据或同步后台任务。
+
+---
+
+## 11. 第十步：扩展完整研发链路
 
 核心闭环稳定后，再增加上游和下游角色。
 
-### 9.1 上游 Agent
+### 11.1 上游 Agent
 
 - Requirement Agent；
 - Data Architect Agent；
 - Task Planner Agent。
 
-### 9.2 下游 Agent
+### 11.2 下游 Agent
 
 - Frontend Builder Agent；
 - Document Publisher；
@@ -923,7 +981,7 @@ PRD
 
 ---
 
-## 11. 权限模型
+## 12. 权限模型
 
 | Agent | 建议权限 |
 |---|---|
@@ -941,7 +999,7 @@ PRD
 
 ---
 
-## 12. 总任务清单
+## 13. 总任务清单
 
 | ID | 任务 | 优先级 | 依赖 |
 |---|---|---:|---|
@@ -979,7 +1037,7 @@ PRD
 | WFL-005 | 更新 Runner 启动与运维文档 | P0 | WFL-004 |
 | INT-001 | 统一 Requirement Intake API | P0 | WFL-005 |
 | INT-002 | UI 创建 Feature 和拆分预览 | P1 | INT-001 |
-| INT-003 | 外部 Issue 幂等导入 | P1 | INT-001 |
+| INT-003 | 外部 Issue 幂等导入（后续期） | P2 | INT-001 |
 | HARD-001 | 权限和秘密隔离 | P0 | SYM-004 |
 | HARD-002 | 重启恢复测试 | P0 | ACP-003 |
 | HARD-003 | 并发 Claim 测试 | P0 | ACP-003 |
@@ -987,7 +1045,7 @@ PRD
 
 ---
 
-## 13. 启动顺序
+## 14. 启动顺序
 
 最初的两个开发阶段：
 
@@ -997,8 +1055,8 @@ PRD
 这两步完成后再接入 Symphony，不反过来先修改 Symphony。
 
 截至 2026-08-04，协议、控制面、Windows Runner、Profile/Skill、端到端验证、最小
-UI 以及 `WFL-001` 至 `WFL-005` 已完成。下一阶段从 `INT-001` 统一
-Requirement Intake 开始，再开发 UI 创建需求和外部 Issue 导入。
+UI 以及 `WFL-001` 至 `WFL-005` 已完成。本期只完成 `INT-001` 手工录入 API 和
+`INT-002` UI 创建与拆分预览；`INT-003` 外部 Issue 导入延期。
 
 第一阶段完成标志不是“看板能打开”，而是可以用固定 Schema 和 API 人工走通：
 

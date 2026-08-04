@@ -67,6 +67,8 @@ const state = {
   detail: null,
   activeTab: "overview",
   pendingAction: null,
+  issuePreview: null,
+  repositoryHeadPromise: null,
   loading: false,
   authPrompted: false,
 };
@@ -107,6 +109,16 @@ const dom = {
   tokenModal: document.querySelector("#token-modal"),
   tokenForm: document.querySelector("#token-form"),
   tokenInput: document.querySelector("#token-input"),
+  newIssueButton: document.querySelector("#new-issue-button"),
+  issueModal: document.querySelector("#issue-modal"),
+  issueForm: document.querySelector("#issue-form"),
+  issuePreview: document.querySelector("#issue-preview"),
+  issuePreviewList: document.querySelector("#issue-preview-list"),
+  issuePreviewButton: document.querySelector("#issue-preview-button"),
+  issueCreateButton: document.querySelector("#issue-create-button"),
+  issueError: document.querySelector("#issue-error"),
+  commitResolveButton: document.querySelector("#commit-resolve-button"),
+  commitStatus: document.querySelector("#commit-status"),
   actionModal: document.querySelector("#action-modal"),
   actionForm: document.querySelector("#action-form"),
   actionEyebrow: document.querySelector("#action-eyebrow"),
@@ -381,6 +393,112 @@ function openTokenModal() {
   dom.tokenInput.value = state.token;
   dom.tokenModal.showModal();
   window.setTimeout(() => dom.tokenInput.focus(), 0);
+}
+
+function suggestedFeatureId() {
+  return `FEATURE-${String(Date.now()).slice(-10)}`;
+}
+
+function manualIssuePayload() {
+  const formData = new FormData(dom.issueForm);
+  const criteria = String(formData.get("acceptance_criteria") || "")
+    .split(/\r?\n/)
+    .map((criterion) => criterion.trim())
+    .filter(Boolean);
+  return {
+    feature_id: String(formData.get("feature_id") || "").trim().toUpperCase(),
+    title: String(formData.get("title") || "").trim(),
+    description: String(formData.get("description") || "").trim(),
+    priority: Number(formData.get("priority") || 2),
+    repository: {
+      url: String(formData.get("repository_url") || "").trim(),
+      base_branch: String(formData.get("base_branch") || "").trim(),
+      head_branch: null,
+      commit: String(formData.get("commit") || "").trim().toLowerCase(),
+      pull_request: null,
+    },
+    acceptance_criteria: criteria,
+  };
+}
+
+function isLocalRepositoryPath(value) {
+  return /^[a-zA-Z]:[\\/]/.test(value) || /^\\\\/.test(value);
+}
+
+function setCommitStatus(message, status = "idle") {
+  dom.commitStatus.textContent = message;
+  dom.commitStatus.dataset.status = status;
+}
+
+async function resolveRepositoryHead({ explicit = false } = {}) {
+  const path = dom.issueForm.elements.repository_url.value.trim();
+  if (!path) {
+    if (explicit) setCommitStatus("请先填写本地仓库绝对路径。", "error");
+    return false;
+  }
+  if (!isLocalRepositoryPath(path)) {
+    setCommitStatus("远程仓库不会在本机执行 Git，请手工填写完整 40 位 Commit。", "idle");
+    return false;
+  }
+  if (state.repositoryHeadPromise) return state.repositoryHeadPromise;
+
+  dom.commitResolveButton.disabled = true;
+  setCommitStatus("正在读取本地仓库 HEAD…", "loading");
+  state.repositoryHeadPromise = (async () => {
+    try {
+      const result = await api("/api/repositories/resolve-head", {
+        method: "POST",
+        body: JSON.stringify({ path }),
+      });
+      if (dom.issueForm.elements.repository_url.value.trim() !== path) return false;
+      dom.issueForm.elements.repository_url.value = result.path;
+      dom.issueForm.elements.commit.value = result.commit;
+      setCommitStatus(`已锁定 HEAD · ${result.commit.slice(0, 12)}`, "success");
+      clearIssuePreview();
+      return true;
+    } catch (error) {
+      setCommitStatus(`读取失败：${error.message}`, "error");
+      return false;
+    } finally {
+      dom.commitResolveButton.disabled = false;
+    }
+  })();
+  try {
+    return await state.repositoryHeadPromise;
+  } finally {
+    state.repositoryHeadPromise = null;
+  }
+}
+
+function clearIssuePreview() {
+  state.issuePreview = null;
+  dom.issuePreview.hidden = true;
+  dom.issuePreviewList.innerHTML = "";
+  dom.issueCreateButton.disabled = true;
+  dom.issueError.hidden = true;
+  dom.issueError.textContent = "";
+}
+
+function openIssueModal() {
+  dom.issueForm.reset();
+  dom.issueForm.elements.feature_id.value = suggestedFeatureId();
+  clearIssuePreview();
+  setCommitStatus("本地仓库自动读取；远程仓库可手工填写完整 40 位 Commit。", "idle");
+  dom.issueModal.showModal();
+  window.setTimeout(() => dom.issueForm.elements.title.focus(), 0);
+}
+
+function renderIssuePreview(plan) {
+  dom.issuePreviewList.innerHTML = plan.work_items.map((item) => {
+    const role = ROLE_META[item.agent_role]?.label || item.agent_role;
+    return `<article class="issue-preview-item" title="${escapeHtml(item.title)}">
+      <strong>${escapeHtml(item.id)}</strong>
+      <span>${escapeHtml(role)}</span>
+      <small>${escapeHtml(item.status)}</small>
+    </article>`;
+  }).join("");
+  dom.issuePreview.hidden = false;
+  dom.issueCreateButton.disabled = false;
 }
 
 function openDrawer() {
@@ -738,6 +856,7 @@ async function executeAction(formData) {
 }
 
 dom.tokenButton.addEventListener("click", openTokenModal);
+dom.newIssueButton.addEventListener("click", openIssueModal);
 dom.refreshButton.addEventListener("click", () => refresh());
 dom.featureSearch.addEventListener("input", renderFeatures);
 dom.workItemSearch.addEventListener("input", renderBoard);
@@ -790,6 +909,72 @@ dom.tokenForm.addEventListener("submit", (event) => {
   refresh();
 });
 
+dom.issueForm.addEventListener("input", () => {
+  if (state.issuePreview) clearIssuePreview();
+});
+
+dom.issueForm.elements.repository_url.addEventListener("input", () => {
+  setCommitStatus("路径填写完成后将自动读取本地仓库 HEAD。", "idle");
+});
+
+dom.issueForm.elements.repository_url.addEventListener("blur", () => {
+  resolveRepositoryHead();
+});
+
+dom.commitResolveButton.addEventListener("click", () => {
+  resolveRepositoryHead({ explicit: true });
+});
+
+dom.issueForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const action = event.submitter?.value;
+  if (action === "cancel") {
+    dom.issueModal.close();
+    clearIssuePreview();
+    return;
+  }
+
+  dom.issuePreviewButton.disabled = true;
+  dom.issueCreateButton.disabled = true;
+  dom.issueError.hidden = true;
+  try {
+    const commitInput = dom.issueForm.elements.commit;
+    if (!/^[a-fA-F0-9]{40}$/.test(commitInput.value.trim())) {
+      await resolveRepositoryHead({ explicit: true });
+    }
+    const payload = manualIssuePayload();
+    if (!/^[a-f0-9]{40}$/.test(payload.repository.commit)) {
+      throw new Error("未能确定代码版本，请读取本地 HEAD 或填写完整 40 位 Commit");
+    }
+    if (!payload.acceptance_criteria.length) throw new Error("请至少填写一条验收标准");
+    if (action === "preview") {
+      const plan = await api("/api/intake/manual/issues/preview", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      state.issuePreview = plan;
+      renderIssuePreview(plan);
+    } else if (action === "create") {
+      const result = await api("/api/intake/manual/issues", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      state.selectedFeatureId = result.feature.id;
+      sessionStorage.setItem("acp_feature_id", result.feature.id);
+      dom.issueModal.close();
+      clearIssuePreview();
+      toast(`已创建 ${result.feature.id} 和 ${result.work_items.length} 个工作项`);
+      await refresh();
+    }
+  } catch (error) {
+    dom.issueError.textContent = error.message;
+    dom.issueError.hidden = false;
+  } finally {
+    dom.issuePreviewButton.disabled = false;
+    dom.issueCreateButton.disabled = !state.issuePreview;
+  }
+});
+
 dom.actionForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (event.submitter?.value === "cancel") {
@@ -815,7 +1000,7 @@ dom.actionForm.addEventListener("submit", async (event) => {
 });
 
 window.setInterval(() => {
-  if (!document.hidden && !dom.actionModal.open && !dom.tokenModal.open) refresh({ quiet: true });
+  if (!document.hidden && !dom.actionModal.open && !dom.tokenModal.open && !dom.issueModal.open) refresh({ quiet: true });
 }, 5000);
 
 document.addEventListener("visibilitychange", () => {

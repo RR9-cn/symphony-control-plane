@@ -22,6 +22,19 @@ class RepositoryData(ApiModel):
     pull_request: str | None = None
 
 
+class ManualIssueRepository(RepositoryData):
+    commit: str = Field(pattern=r"^[a-fA-F0-9]{40}$")
+
+
+class RepositoryHeadRequest(ApiModel):
+    path: str = Field(min_length=1)
+
+
+class RepositoryHeadView(ApiModel):
+    path: str
+    commit: str = Field(pattern=r"^[a-f0-9]{40}$")
+
+
 class ArtifactData(ApiModel):
     path: str = Field(min_length=1)
     revision: str = Field(min_length=1)
@@ -38,6 +51,25 @@ class FeatureCreate(ApiModel):
 class FeatureView(FeatureCreate):
     created_at: datetime
     updated_at: datetime
+
+
+class ManualIssueCreate(ApiModel):
+    feature_id: str = Field(pattern=r"^FEATURE-[0-9]{3,}$")
+    title: str = Field(min_length=1, max_length=200)
+    description: str = Field(min_length=1)
+    priority: int = Field(default=2, ge=0, le=4)
+    repository: ManualIssueRepository
+    acceptance_criteria: list[str] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_acceptance_criteria(self) -> "ManualIssueCreate":
+        normalized = [criterion.strip() for criterion in self.acceptance_criteria]
+        if any(not criterion for criterion in normalized):
+            raise ValueError("acceptance criteria must not be blank")
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("acceptance criteria must be unique")
+        self.acceptance_criteria = normalized
+        return self
 
 
 class ClaimView(ApiModel):
@@ -108,6 +140,18 @@ class WorkItemView(ApiModel):
     retry_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class ManualIssuePreview(ApiModel):
+    template: Literal["five_stage_backend_v1"] = "five_stage_backend_v1"
+    feature: FeatureCreate
+    work_items: list[WorkItemCreate]
+
+
+class ManualIssueResult(ApiModel):
+    template: Literal["five_stage_backend_v1"] = "five_stage_backend_v1"
+    feature: FeatureView
+    work_items: list[WorkItemView]
 
 
 class AgentProfileClaim(ApiModel):

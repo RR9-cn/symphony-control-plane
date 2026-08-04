@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from datetime import timedelta
 
 from sqlalchemy import update
@@ -23,10 +24,15 @@ async def test_dashboard_and_feature_list(api) -> None:
     assert dashboard.status_code == 200
     assert "Fshows Agent Control Plane" in dashboard.text
     assert "/ui/assets/app.js" in dashboard.text
+    assert "手工录入 Issue" in dashboard.text
 
     stylesheet = await api.get("/ui/assets/styles.css")
     assert stylesheet.status_code == 200
     assert stylesheet.headers["content-type"].startswith("text/css")
+    javascript = await api.get("/ui/assets/app.js")
+    assert javascript.status_code == 200
+    assert "/api/intake/manual/issues/preview" in javascript.text
+    assert "/api/repositories/resolve-head" in javascript.text
 
     for feature in (
         feature_payload(),
@@ -45,6 +51,162 @@ async def test_dashboard_and_feature_list(api) -> None:
         "FEATURE-001",
         "FEATURE-002",
     }
+
+
+async def test_resolve_local_repository_head(api, tmp_path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.name", "Test Runner"],
+        check=True,
+    )
+    (repository / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", "README.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "--quiet", "-m", "fixture"],
+        check=True,
+    )
+    expected = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    response = await api.post(
+        "/api/repositories/resolve-head", json={"path": str(repository)}
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"path": str(repository.resolve()), "commit": expected}
+
+
+async def test_resolve_repository_head_rejects_non_local_or_invalid_path(api, tmp_path) -> None:
+    relative = await api.post(
+        "/api/repositories/resolve-head", json={"path": "relative/repository"}
+    )
+    assert relative.status_code == 422
+    assert relative.json()["error"]["code"] == "repository_resolution_failed"
+
+    non_repository = tmp_path / "not-a-repository"
+    non_repository.mkdir()
+    invalid = await api.post(
+        "/api/repositories/resolve-head", json={"path": str(non_repository)}
+    )
+    assert invalid.status_code == 422
+
+
+async def test_manual_issue_preview_and_atomic_creation(api) -> None:
+    payload = {
+        "feature_id": "FEATURE-7001",
+        "title": "查询用户详情",
+        "description": "新增只读接口，根据用户 ID 查询用户详情。",
+        "priority": 1,
+        "repository": {
+            "url": r"D:\fws-repo-cache\hengxi-cultural-tourism",
+            "base_branch": "master",
+            "head_branch": None,
+            "commit": "a" * 40,
+            "pull_request": None,
+        },
+        "acceptance_criteria": [
+            "存在用户返回详情",
+            "不存在用户返回明确的业务错误",
+        ],
+    }
+
+    preview = await api.post("/api/intake/manual/issues/preview", json=payload)
+    assert preview.status_code == 200, preview.text
+    plan = preview.json()
+    assert plan["template"] == "five_stage_backend_v1"
+    assert plan["feature"]["id"] == "FEATURE-7001"
+    assert [item["agent_role"] for item in plan["work_items"]] == [
+        "solution_architect",
+        "backend_builder",
+        "code_reviewer",
+        "test_designer",
+        "test_executor",
+    ]
+    assert [item["id"] for item in plan["work_items"]] == [
+        "WI-700101",
+        "WI-700102",
+        "WI-700103",
+        "WI-700104",
+        "WI-700105",
+    ]
+    assert plan["work_items"][0]["status"] == "ready"
+    assert all(item["status"] == "draft" for item in plan["work_items"][1:])
+    assert plan["work_items"][1]["dependencies"] == ["WI-700101"]
+    assert (await api.get("/api/features")).json() == []
+
+    created = await api.post("/api/intake/manual/issues", json=payload)
+    assert created.status_code == 201, created.text
+    result = created.json()
+    assert result["feature"]["id"] == "FEATURE-7001"
+    assert len(result["work_items"]) == 5
+    candidates = (await api.get("/api/work-items/candidates")).json()
+    assert [item["id"] for item in candidates] == ["WI-700101"]
+    items = (await api.get("/api/work-items", params={"feature_id": "FEATURE-7001"})).json()
+    assert len(items) == 5
+    assert items[1]["blocked_by"] == ["WI-700101"]
+
+    duplicate = await api.post("/api/intake/manual/issues", json=payload)
+    assert duplicate.status_code == 409
+    assert len((await api.get("/api/work-items")).json()) == 5
+
+
+async def test_manual_issue_requires_immutable_commit(api) -> None:
+    response = await api.post(
+        "/api/intake/manual/issues/preview",
+        json={
+            "feature_id": "FEATURE-7002",
+            "title": "Invalid input",
+            "description": "The repository revision is not immutable.",
+            "repository": {
+                "url": "https://example.invalid/repository.git",
+                "base_branch": "main",
+                "commit": "main",
+            },
+            "acceptance_criteria": ["must not be accepted"],
+        },
+    )
+    assert response.status_code == 422
+
+
+async def test_manual_issue_creation_rolls_back_on_generated_id_conflict(api) -> None:
+    existing_feature = {
+        "id": "FEATURE-7999",
+        "title": "Existing feature",
+        "description": "Owns a colliding WorkItem ID.",
+    }
+    assert (await api.post("/api/features", json=existing_feature)).status_code == 201
+    colliding_item = work_item_payload("WI-700101")
+    colliding_item["feature_id"] = "FEATURE-7999"
+    assert (await api.post("/api/work-items", json=colliding_item)).status_code == 201
+
+    response = await api.post(
+        "/api/intake/manual/issues",
+        json={
+            "feature_id": "FEATURE-7001",
+            "title": "Must remain atomic",
+            "description": "Generated IDs collide with an existing work item.",
+            "repository": {
+                "url": "https://example.invalid/repository.git",
+                "base_branch": "main",
+                "commit": "b" * 40,
+            },
+            "acceptance_criteria": ["No partial feature is persisted"],
+        },
+    )
+
+    assert response.status_code == 409
+    assert (await api.get("/api/features/FEATURE-7001")).status_code == 404
+    assert len((await api.get("/api/work-items")).json()) == 1
 
 
 async def test_dependencies_gate_candidates_and_status_events(api) -> None:

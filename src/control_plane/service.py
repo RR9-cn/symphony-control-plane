@@ -46,6 +46,9 @@ from control_plane.schemas import (
     FeatureCreate,
     FeatureView,
     HeartbeatRequest,
+    ManualIssueCreate,
+    ManualIssuePreview,
+    ManualIssueResult,
     MaintenanceResult,
     ReleaseRequest,
     RepositoryData,
@@ -64,6 +67,45 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+_MANUAL_ISSUE_STAGES = (
+    (
+        "solution_architect",
+        "tech_analysis",
+        "技术分析",
+        "分析需求、现有实现、接口、数据流和风险，生成结构化技术交接。",
+        "技术分析与 Handoff 已登记，公开接口、兼容性和安全边界清晰。",
+    ),
+    (
+        "backend_builder",
+        "implementation",
+        "后端实现",
+        "按照已批准技术分析实现需求、补充测试并登记代码交接。",
+        "实现满足 Issue 验收标准，相关构建、检查和测试已通过。",
+    ),
+    (
+        "code_reviewer",
+        "code_review",
+        "代码评审",
+        "从 Standards 与 Spec 两个维度只读评审实现并登记发现。",
+        "评审报告包含严重级别、证据和处置结论，HIGH 发现已退回。",
+    ),
+    (
+        "test_designer",
+        "test_design",
+        "测试方案",
+        "基于需求、实现和评审结果设计可执行测试方案。",
+        "测试方案覆盖验收标准、边界、失败路径和回归场景。",
+    ),
+    (
+        "test_executor",
+        "test_execution",
+        "测试执行",
+        "严格执行测试方案，记录结果、证据和最终交接。",
+        "全部测试场景具有结果和证据，业务缺陷已按流程退回。",
+    ),
+)
 
 
 class ControlPlaneService:
@@ -92,6 +134,108 @@ class ControlPlaneService:
             )
         ).all()
         return [FeatureView.model_validate(feature) for feature in features]
+
+    async def preview_manual_issue(
+        self, command: ManualIssueCreate
+    ) -> ManualIssuePreview:
+        feature = FeatureCreate(
+            id=command.feature_id,
+            title=command.title,
+            description=command.description,
+        )
+        feature_number = command.feature_id.removeprefix("FEATURE-")
+        work_items: list[WorkItemCreate] = []
+        previous_id: str | None = None
+        for index, (role, stage, label, description, stage_criterion) in enumerate(
+            _MANUAL_ISSUE_STAGES, start=1
+        ):
+            item_id = f"WI-{feature_number}{index:02d}"
+            criteria = [*command.acceptance_criteria, stage_criterion]
+            work_items.append(
+                WorkItemCreate(
+                    id=item_id,
+                    feature_id=command.feature_id,
+                    title=f"{label}：{command.title}",
+                    description=f"{description}\n\n原始 Issue：{command.description}",
+                    stage=stage,
+                    agent_role=role,
+                    status="ready" if index == 1 else "draft",
+                    priority=command.priority,
+                    repository=command.repository,
+                    dependencies=[previous_id] if previous_id else [],
+                    acceptance_criteria=criteria,
+                )
+            )
+            previous_id = item_id
+        return ManualIssuePreview(feature=feature, work_items=work_items)
+
+    async def create_manual_issue(
+        self, command: ManualIssueCreate
+    ) -> ManualIssueResult:
+        plan = await self.preview_manual_issue(command)
+        item_ids = [item.id for item in plan.work_items]
+        async with self.session.begin():
+            if await self.session.get(Feature, plan.feature.id):
+                raise ConflictError(f"feature already exists: {plan.feature.id}")
+            existing_ids = (
+                await self.session.scalars(
+                    select(WorkItem.id).where(WorkItem.id.in_(item_ids))
+                )
+            ).all()
+            if existing_ids:
+                raise ConflictError(
+                    f"generated work item already exists: {sorted(existing_ids)[0]}"
+                )
+
+            feature = Feature(**plan.feature.model_dump())
+            self.session.add(feature)
+            await self.session.flush()
+
+            for command_item in plan.work_items:
+                self.session.add(
+                    WorkItem(
+                        id=command_item.id,
+                        feature_id=command_item.feature_id,
+                        parent_id=None,
+                        title=command_item.title,
+                        description=command_item.description,
+                        stage=command_item.stage,
+                        agent_role=command_item.agent_role,
+                        status=command_item.status,
+                        priority=command_item.priority,
+                        version=1,
+                        repository=command_item.repository.model_dump(),
+                        acceptance_criteria=command_item.acceptance_criteria,
+                    )
+                )
+            await self.session.flush()
+
+            for command_item in plan.work_items:
+                self.session.add_all(
+                    WorkItemDependency(
+                        work_item_id=command_item.id,
+                        depends_on_id=dependency_id,
+                    )
+                    for dependency_id in command_item.dependencies
+                )
+                self._add_event(
+                    command_item.id,
+                    "created",
+                    "user",
+                    "manual-issue-intake",
+                    None,
+                    command_item.status,
+                    {
+                        "version": 1,
+                        "source": "manual_issue",
+                        "template": plan.template,
+                    },
+                )
+
+        return ManualIssueResult(
+            feature=FeatureView.model_validate(feature),
+            work_items=[await self.get_work_item(item_id) for item_id in item_ids],
+        )
 
     async def create_work_item(self, command: WorkItemCreate) -> WorkItemView:
         async with self.session.begin():

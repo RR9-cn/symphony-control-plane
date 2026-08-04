@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import hmac
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, AsyncIterator
@@ -12,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.config import Settings
 from control_plane.database import Database
-from control_plane.errors import ControlPlaneError
+from control_plane.errors import ControlPlaneError, RepositoryResolutionError
 from control_plane.schemas import (
     AgentAttemptView,
     AgentProfileView,
@@ -27,7 +28,12 @@ from control_plane.schemas import (
     FeatureCreate,
     FeatureView,
     HeartbeatRequest,
+    ManualIssueCreate,
+    ManualIssuePreview,
+    ManualIssueResult,
     MaintenanceResult,
+    RepositoryHeadRequest,
+    RepositoryHeadView,
     ReleaseRequest,
     StatusTransitionRequest,
     WorkItemCreate,
@@ -38,6 +44,47 @@ from control_plane.service import ControlPlaneService
 
 
 UI_ROOT = Path(__file__).with_name("ui")
+COMMIT_PATTERN = re.compile(r"^[a-f0-9]{40}$")
+
+
+async def _resolve_local_repository_head(path_value: str) -> RepositoryHeadView:
+    candidate = Path(path_value.strip())
+    if not candidate.is_absolute():
+        raise RepositoryResolutionError("repository path must be an absolute local path")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as error:
+        raise RepositoryResolutionError("repository path does not exist") from error
+    if not resolved.is_dir():
+        raise RepositoryResolutionError("repository path must be a directory")
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "git",
+            "-C",
+            str(resolved),
+            "rev-parse",
+            "--verify",
+            "HEAD^{commit}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+    except FileNotFoundError as error:
+        raise RepositoryResolutionError("git is not installed or is not on PATH") from error
+    except TimeoutError as error:
+        process.kill()
+        await process.communicate()
+        raise RepositoryResolutionError("timed out while reading repository HEAD") from error
+
+    commit = stdout.decode(errors="replace").strip().lower()
+    if process.returncode != 0 or not COMMIT_PATTERN.fullmatch(commit):
+        detail = stderr.decode(errors="replace").strip()
+        message = "path is not a Git repository with a valid HEAD"
+        if detail:
+            message = f"{message}: {detail.splitlines()[-1]}"
+        raise RepositoryResolutionError(message)
+    return RepositoryHeadView(path=str(resolved), commit=commit)
 
 
 async def _lease_sweeper(app: FastAPI) -> None:
@@ -149,6 +196,26 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
     @app.get("/api/features/{feature_id}", response_model=FeatureView)
     async def get_feature(feature_id: str, session: Session) -> FeatureView:
         return await service(session).get_feature(feature_id)
+
+    @app.post("/api/repositories/resolve-head", response_model=RepositoryHeadView)
+    async def resolve_repository_head(command: RepositoryHeadRequest) -> RepositoryHeadView:
+        return await _resolve_local_repository_head(command.path)
+
+    @app.post("/api/intake/manual/issues/preview", response_model=ManualIssuePreview)
+    async def preview_manual_issue(
+        command: ManualIssueCreate, session: Session
+    ) -> ManualIssuePreview:
+        return await service(session).preview_manual_issue(command)
+
+    @app.post(
+        "/api/intake/manual/issues",
+        response_model=ManualIssueResult,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def create_manual_issue(
+        command: ManualIssueCreate, session: Session
+    ) -> ManualIssueResult:
+        return await service(session).create_manual_issue(command)
 
     @app.post(
         "/api/work-items", response_model=WorkItemView, status_code=status.HTTP_201_CREATED

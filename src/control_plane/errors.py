@@ -23,3 +23,8 @@ class ClaimError(ConflictError):
 
 class AgentProfileConflictError(ConflictError):
     code = "agent_profile_conflict"
+
+
+class RepositoryResolutionError(ControlPlaneError):
+    status_code = 422
+    code = "repository_resolution_failed"

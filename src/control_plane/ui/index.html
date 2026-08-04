@@ -27,6 +27,10 @@
             <span class="status-dot"></span>
             <span id="connection-label">正在连接</span>
           </div>
+          <button class="button button-primary" id="new-issue-button" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+            录入 Issue
+          </button>
           <button class="icon-button" id="refresh-button" type="button" title="立即刷新" aria-label="立即刷新">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-3M4 4v4h4M4 13a8.1 8.1 0 0 0 15.5 3M20 20v-4h-4"/></svg>
           </button>
@@ -176,6 +180,73 @@
         <div class="modal-actions">
           <button class="button button-ghost" value="cancel" type="submit">取消</button>
           <button class="button button-primary" id="action-confirm" value="default" type="submit">确认</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="modal issue-modal" id="issue-modal">
+      <form method="dialog" id="issue-form">
+        <div class="modal-copy">
+          <span class="eyebrow">Manual requirement intake</span>
+          <h2>手工录入 Issue</h2>
+          <p>录入需求和不可变代码基线，预览固定五阶段研发链路；确认后仅首个技术分析任务进入 Ready。</p>
+        </div>
+        <div class="issue-form-grid">
+          <label class="field">
+            <span>Feature ID</span>
+            <input name="feature_id" required pattern="FEATURE-[0-9]{3,}" placeholder="FEATURE-7001" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>优先级</span>
+            <select name="priority">
+              <option value="0">P0 · 紧急</option>
+              <option value="1">P1 · 高</option>
+              <option value="2" selected>P2 · 常规</option>
+              <option value="3">P3 · 低</option>
+              <option value="4">P4 · 待排期</option>
+            </select>
+          </label>
+          <label class="field issue-span-all">
+            <span>Issue 标题</span>
+            <input name="title" required maxlength="200" placeholder="例如：新增用户详情查询接口" autocomplete="off" />
+          </label>
+          <label class="field issue-span-all">
+            <span>需求描述</span>
+            <textarea name="description" required placeholder="说明目标、范围、关键业务规则和不做什么"></textarea>
+          </label>
+          <label class="field issue-span-all">
+            <span>仓库地址或本机绝对路径</span>
+            <input name="repository_url" required placeholder="D:\fws-repo-cache\project" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Base Branch</span>
+            <input name="base_branch" required value="master" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>代码版本</span>
+            <div class="commit-input-row">
+              <input name="commit" pattern="[a-fA-F0-9]{40}" minlength="40" maxlength="40" placeholder="填写本地仓库后自动获取" autocomplete="off" />
+              <button class="button button-secondary commit-resolve-button" id="commit-resolve-button" type="button">读取 HEAD</button>
+            </div>
+            <small class="field-hint" id="commit-status">本地仓库自动读取；远程仓库可手工填写完整 40 位 Commit。</small>
+          </label>
+          <label class="field issue-span-all">
+            <span>验收标准（每行一条）</span>
+            <textarea name="acceptance_criteria" required placeholder="存在用户时返回用户详情&#10;用户不存在时返回明确业务错误"></textarea>
+          </label>
+        </div>
+        <section class="issue-preview" id="issue-preview" hidden>
+          <div class="issue-preview-heading">
+            <div><span class="eyebrow">Decomposition preview</span><h3>五阶段执行链</h3></div>
+            <span>确认后创建 5 个 WorkItem</span>
+          </div>
+          <div class="issue-preview-list" id="issue-preview-list"></div>
+        </section>
+        <div class="modal-error" id="issue-error" hidden></div>
+        <div class="modal-actions">
+          <button class="button button-ghost" value="cancel" type="submit">取消</button>
+          <button class="button button-secondary" id="issue-preview-button" value="preview" type="submit">生成拆分预览</button>
+          <button class="button button-primary" id="issue-create-button" value="create" type="submit" disabled>确认创建</button>
         </div>
       </form>
     </dialog>
