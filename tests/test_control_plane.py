@@ -18,6 +18,35 @@ async def create_fixture(api, *work_items: dict[str, object]) -> None:
         assert response.status_code == 201, response.text
 
 
+async def test_dashboard_and_feature_list(api) -> None:
+    dashboard = await api.get("/")
+    assert dashboard.status_code == 200
+    assert "Fshows Agent Control Plane" in dashboard.text
+    assert "/ui/assets/app.js" in dashboard.text
+
+    stylesheet = await api.get("/ui/assets/styles.css")
+    assert stylesheet.status_code == 200
+    assert stylesheet.headers["content-type"].startswith("text/css")
+
+    for feature in (
+        feature_payload(),
+        {
+            "id": "FEATURE-002",
+            "title": "Second feature",
+            "description": "Feature list fixture",
+        },
+    ):
+        response = await api.post("/api/features", json=feature)
+        assert response.status_code == 201, response.text
+
+    features = await api.get("/api/features")
+    assert features.status_code == 200, features.text
+    assert {feature["id"] for feature in features.json()} == {
+        "FEATURE-001",
+        "FEATURE-002",
+    }
+
+
 async def test_dependencies_gate_candidates_and_status_events(api) -> None:
     await create_fixture(
         api,

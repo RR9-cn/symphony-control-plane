@@ -43,13 +43,20 @@ python -m venv .venv
 python -m pip install -r requirements-dev.txt
 ```
 
-复制并修改示例：
+仓库根目录已经提供正式配置：
 
 ```powershell
-Copy-Item WORKFLOW.windows.example.md WORKFLOW.md
+Get-Item .\WORKFLOW.md
 ```
 
-`WORKFLOW.md` 使用 Symphony SPEC 的 YAML Front Matter 和 Liquid Prompt。配置读取严格模式：缺少环境变量、未知 Prompt 变量、不安全 HTTP 地址、重复角色匹配、不存在或越界的 Prompt 文件和越界参数都会在启动前失败。
+`WORKFLOW.windows.example.md` 只用于部署方创建其他变体，不再作为默认启动入口。
+正式 `WORKFLOW.md` 使用 Symphony SPEC 的 YAML Front Matter 和 Liquid Prompt。
+配置读取严格模式：缺少环境变量、未知 Prompt 变量、不安全 HTTP 地址、重复角色匹配、不存在或越界的 Prompt 文件和越界参数都会在启动前失败。
+
+首次创建 WorkItem Workspace 时，正式 Workflow 会读取
+`repository.url` 和完整 40 位 `repository.commit`，Clone 仓库后以 detached
+HEAD 检出该 commit 并核对实际 HEAD。Continuation、NeedsHuman 恢复和 Rework
+复用现有 Workspace，不会重置 Agent 已完成的工作。
 
 ## Agent Profile 路由
 
@@ -168,11 +175,28 @@ Running → NeedsHuman（清除 Claim）
 
 ## 启动
 
+先准备宿主环境变量。Token 只提供给 Control Plane 和 Runner；固定 Skill revision
+必须是包含当前 Profile Skill 的完整 Git commit：
+
+```powershell
+$env:ACP_API_TOKEN = "replace-with-a-random-host-only-token"
+$env:CONTROL_PLANE_TOKEN = $env:ACP_API_TOKEN
+$env:SYMPHONY_WORKER_ID = "windows-symphony-01"
+$env:FSHOWS_SKILLS_REPOSITORY = (Get-Location).Path
+$env:FSHOWS_SKILLS_REVISION = git rev-parse HEAD
+```
+
+启动任何 Worker 前先执行只读验收。该命令严格渲染五个 Profile Prompt，并 checkout
+固定 Skill revision 做兼容性检查；不会 Claim WorkItem、启动 Codex 或修改目标项目：
+
+```powershell
+python scripts/validate_workflow.py .\WORKFLOW.md
+```
+
 先启动 SQLite 控制面：
 
 ```powershell
 $env:PYTHONPATH = "src"
-$env:ACP_API_TOKEN = "replace-with-a-random-host-only-token"
 alembic upgrade head
 python -m uvicorn control_plane.app:app --host 127.0.0.1 --port 8080
 ```
@@ -181,8 +205,6 @@ python -m uvicorn control_plane.app:app --host 127.0.0.1 --port 8080
 
 ```powershell
 $env:PYTHONPATH = "src"
-$env:CONTROL_PLANE_TOKEN = $env:ACP_API_TOKEN
-$env:SYMPHONY_WORKER_ID = "windows-symphony-01"
 python -m symphony_windows .\WORKFLOW.md
 ```
 

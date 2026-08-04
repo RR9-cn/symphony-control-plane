@@ -53,7 +53,14 @@ class WorkspaceManager:
             raise WorkspaceError(f"workspace escapes configured root: {resolved}")
         prepared = PreparedWorkspace(path=resolved, created=created)
         if created:
-            await self.run_hook("after_create", issue, resolved)
+            try:
+                await self.run_hook("after_create", issue, resolved)
+            except BaseException:
+                # No Agent has run in a newly created workspace. Remove a failed
+                # partial clone so the next dispatch can execute after_create again.
+                if resolved != root and resolved.is_relative_to(root):
+                    shutil.rmtree(resolved, ignore_errors=True)
+                raise
         return prepared
 
     async def before_run(self, issue: dict[str, Any], workspace: Path) -> None:

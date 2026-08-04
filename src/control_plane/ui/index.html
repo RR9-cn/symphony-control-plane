@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0a0d12" />
+    <title>Fshows Agent Control Plane</title>
+    <link rel="stylesheet" href="/ui/assets/styles.css" />
+    <script src="/ui/assets/app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="返回控制面首页">
+          <span class="brand-mark" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </span>
+          <span>
+            <strong>Fshows</strong>
+            <small>Agent Control Plane</small>
+          </span>
+        </a>
+
+        <div class="topbar-actions">
+          <div class="connection-pill" id="connection-pill" title="控制面连接状态">
+            <span class="status-dot"></span>
+            <span id="connection-label">正在连接</span>
+          </div>
+          <button class="icon-button" id="refresh-button" type="button" title="立即刷新" aria-label="立即刷新">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-3M4 4v4h4M4 13a8.1 8.1 0 0 0 15.5 3M20 20v-4h-4"/></svg>
+          </button>
+          <button class="button button-secondary" id="token-button" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="3"/><path d="m10.5 12.5 7-7 2 2-1.5 1.5 1.5 1.5-2 2-1.5-1.5-3.5 3.5"/></svg>
+            API 凭据
+          </button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="feature-sidebar">
+          <div class="sidebar-heading">
+            <div>
+              <span class="eyebrow">Workspace</span>
+              <h1>研发任务</h1>
+            </div>
+            <span class="count-badge" id="feature-count">0</span>
+          </div>
+
+          <label class="search-box">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+            <input id="feature-search" type="search" placeholder="搜索 Feature" autocomplete="off" />
+          </label>
+
+          <nav class="feature-list" id="feature-list" aria-label="Feature 列表">
+            <div class="skeleton feature-skeleton"></div>
+            <div class="skeleton feature-skeleton"></div>
+            <div class="skeleton feature-skeleton"></div>
+          </nav>
+
+          <div class="sidebar-footer">
+            <span>自动刷新</span>
+            <strong><span class="live-dot"></span> 5 秒</strong>
+          </div>
+        </aside>
+
+        <section class="dashboard">
+          <div class="dashboard-header">
+            <div>
+              <div class="breadcrumb"><span>Features</span><span>/</span><strong id="feature-id">全部</strong></div>
+              <h2 id="feature-title">任务总览</h2>
+              <p id="feature-description">查看 Agent 执行状态、交接产物和人工决策。</p>
+            </div>
+            <div class="view-controls">
+              <label class="compact-search">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+                <input id="work-item-search" type="search" placeholder="搜索工作项" autocomplete="off" />
+              </label>
+              <select id="role-filter" aria-label="按 Agent 角色筛选">
+                <option value="">全部角色</option>
+                <option value="solution_architect">Solution Architect</option>
+                <option value="backend_builder">Backend Builder</option>
+                <option value="code_reviewer">Code Reviewer</option>
+                <option value="test_designer">Test Designer</option>
+                <option value="test_executor">Test Executor</option>
+              </select>
+            </div>
+          </div>
+
+          <section class="metrics" aria-label="任务指标">
+            <article class="metric-card">
+              <span class="metric-icon metric-total"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 9h8M8 13h5"/></svg></span>
+              <div><strong id="metric-total">—</strong><span>工作项总数</span></div>
+              <small id="metric-completion">等待数据</small>
+            </article>
+            <article class="metric-card">
+              <span class="metric-icon metric-running"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7Z"/></svg></span>
+              <div><strong id="metric-running">—</strong><span>正在执行</span></div>
+              <small id="metric-workers">0 个 Worker</small>
+            </article>
+            <article class="metric-card">
+              <span class="metric-icon metric-human"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M5 21a7 7 0 0 1 14 0"/></svg></span>
+              <div><strong id="metric-human">—</strong><span>等待人工</span></div>
+              <small>需要处理</small>
+            </article>
+            <article class="metric-card">
+              <span class="metric-icon metric-risk"><svg viewBox="0 0 24 24"><path d="M12 3 2.8 19h18.4Z"/><path d="M12 9v4M12 17h.01"/></svg></span>
+              <div><strong id="metric-risk">—</strong><span>阻塞 / 返工</span></div>
+              <small id="metric-retry">0 个重试</small>
+            </article>
+          </section>
+
+          <section class="board-panel">
+            <div class="section-heading">
+              <div>
+                <span class="eyebrow">Live workflow</span>
+                <h3>任务看板</h3>
+              </div>
+              <span class="last-updated" id="last-updated">尚未刷新</span>
+            </div>
+            <div class="board" id="board" aria-live="polite"></div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+    <aside class="detail-drawer" id="detail-drawer" aria-label="工作项详情" aria-hidden="true">
+      <div class="drawer-header">
+        <div>
+          <div class="drawer-kicker"><span id="drawer-id">WI-000</span><span id="drawer-status" class="status-chip">Draft</span></div>
+          <h2 id="drawer-title">工作项详情</h2>
+        </div>
+        <button class="icon-button" id="drawer-close" type="button" aria-label="关闭详情">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+      <div class="drawer-tabs" role="tablist">
+        <button class="drawer-tab active" type="button" data-tab="overview">概览</button>
+        <button class="drawer-tab" type="button" data-tab="activity">时间线 <span id="event-count">0</span></button>
+        <button class="drawer-tab" type="button" data-tab="attempts">执行 <span id="attempt-count">0</span></button>
+        <button class="drawer-tab" type="button" data-tab="artifacts">产物 <span id="artifact-count">0</span></button>
+      </div>
+      <div class="drawer-content" id="drawer-content"></div>
+      <div class="drawer-actions" id="drawer-actions"></div>
+    </aside>
+
+    <dialog class="modal" id="token-modal">
+      <form method="dialog" id="token-form">
+        <div class="modal-icon"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="3"/><path d="m10.5 12.5 7-7 2 2-1.5 1.5 1.5 1.5-2 2-1.5-1.5-3.5 3.5"/></svg></div>
+        <div class="modal-copy">
+          <span class="eyebrow">Session credential</span>
+          <h2>连接控制面</h2>
+          <p>如果后端启用了 Bearer 认证，请输入 API Token。凭据仅保存在当前浏览器标签页。</p>
+        </div>
+        <label class="field">
+          <span>API Token</span>
+          <input id="token-input" type="password" placeholder="留空表示不使用认证" autocomplete="off" />
+        </label>
+        <div class="modal-actions">
+          <button class="button button-ghost" value="cancel" type="submit">取消</button>
+          <button class="button button-primary" id="token-save" value="default" type="submit">保存并连接</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="modal action-modal" id="action-modal">
+      <form method="dialog" id="action-form">
+        <div class="modal-copy">
+          <span class="eyebrow" id="action-eyebrow">Human gate</span>
+          <h2 id="action-title">确认操作</h2>
+          <p id="action-description"></p>
+        </div>
+        <div id="action-fields"></div>
+        <div class="modal-error" id="action-error" hidden></div>
+        <div class="modal-actions">
+          <button class="button button-ghost" value="cancel" type="submit">取消</button>
+          <button class="button button-primary" id="action-confirm" value="default" type="submit">确认</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="toast-region" id="toast-region" aria-live="polite"></div>
+  </body>
+</html>

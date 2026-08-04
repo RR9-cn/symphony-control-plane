@@ -797,9 +797,99 @@ Done
 - Blocker；
 - 重试时间。
 
+### 8.4 实现结果（2026-08-04）
+
+第七步最小看板已实现：
+
+- FastAPI 根路径直接提供响应式管理看板，不增加 Node、外部 CDN 或独立部署单元；
+- 新增 Feature 列表 API，看板支持 Feature、角色和关键词筛选；
+- 九列看板完整覆盖 `Draft`、`Ready`、`Running`、`NeedsHuman`、`StageReview`、`Rework`、`RetryQueued`、`Blocked`、`Done/Cancelled`；
+- 工作项详情展示依赖、验收标准、Claim/Lease、Attempt、Codex Thread、Event 时间线以及输入输出 Artifact；
+- 支持人工决策回复、阶段批准、退回返工、Draft 就绪、解除阻塞、重试维护和管理员取消；
+- 页面每 5 秒轮询并在重新聚焦时刷新，后续任务量增大后可无缝替换为 SSE；
+- Bearer Token 仅保存在当前标签页 `sessionStorage`，不进入 URL、日志或持久化存储；
+- 自动化测试覆盖 UI 入口、静态资源和 Feature 列表 API。
+
 ---
 
-## 9. 第八步：扩展完整研发链路
+## 9. 第八步：固化并启用正式 WORKFLOW.md
+
+在继续开发需求录入、外部 Issue 导入和上游 Agent 之前，先把 Windows
+Runner 的仓库契约从示例提升为可验证、可启动、可恢复的正式配置。完成本阶段前，
+不继续扩展 UI 信息架构或新增 Agent Role。
+
+### 9.1 正式配置
+
+仓库根目录必须提交 `WORKFLOW.md`，并完整声明：
+
+- Control Plane Tracker、Bearer Token 环境变量、Worker ID 和 Lease；
+- Poll 间隔、全局并发和 Retry 上限；
+- Windows Workspace 根目录和 PowerShell 生命周期 Hook；
+- 固定 Git revision 的 Skill Repository；
+- 五个 Agent Profile 的 Prompt、Skill、权限、网络、并发和最大 Turn；
+- Codex App Server 命令、审批策略、沙箱、超时和用户目录隔离；
+- 所有 Profile 共用的无人值守执行、人工确认、Handoff 和完成规则。
+
+`WORKFLOW.windows.example.md` 继续作为无秘密的配置模板，但 Runner、文档和验收
+统一以根目录正式 `WORKFLOW.md` 为准。
+
+### 9.2 Workspace 固定规则
+
+首次创建 WorkItem Workspace 时必须：
+
+```text
+读取 WorkItem.repository.url 与 commit
+→ Clone 到唯一 Workspace
+→ checkout --detach 指定 commit
+→ 校验实际 HEAD
+→ 才允许启动 Codex
+```
+
+同一 WorkItem 的 continuation、NeedsHuman 恢复和 Rework 必须复用现有 Workspace，
+不得在 `before_run` 中 reset 或覆盖 Agent 已产生的工作状态。
+
+### 9.3 启动前验收
+
+提供只读 Workflow 验收器，在不 Claim WorkItem、不启动 Codex 的情况下验证：
+
+- YAML Front Matter 和 Liquid Prompt 可严格加载；
+- Profile 集合与协议中的 Agent Role 完全一致；
+- Prompt 文件均位于仓库内且可渲染；
+- Skill Repository revision 是完整 commit，五个 Profile 的 Skill 均存在且兼容；
+- Workspace 路径、Tracker Endpoint、秘密引用和 Codex 策略满足安全约束。
+
+### 9.4 完成标准
+
+- 根目录正式 `WORKFLOW.md` 可通过仓库验收器；
+- 固定 Skill revision 可以完成 checkout 和兼容性检查；
+- 五个 Profile 均能对协议示例 WorkItem 完成严格 Prompt 渲染；
+- Windows Runner 文档不再要求复制示例文件；
+- 自动化测试会阻止正式 Workflow 与 Role、Prompt、Skill 契约发生漂移；
+- 配置验证不读取或输出 Token 值，也不启动 Agent 或修改目标项目。
+
+完成本阶段后，下一阶段才实现统一 Requirement Intake、UI 创建需求、WorkItem
+拆分确认和外部 Issue 幂等导入。
+
+### 9.5 实现结果（2026-08-04）
+
+第八步正式 Workflow 已实现：
+
+- 根目录新增正式 `WORKFLOW.md`，完整配置 Tracker、Workspace Hook、五个 Agent
+  Profile、固定 Skill Repository、Codex 策略和全局无人值守执行规则；
+- `after_create` 严格要求 WorkItem 提供完整 40 位 `repository.commit`，Clone 后以
+  detached HEAD 检出并核对实际 commit；
+- 新 Workspace 的 Clone/Checkout Hook 失败时清理半成品目录，保证后续 Dispatch
+  可以重新执行 `after_create`；
+- 新增 `scripts/validate_workflow.py`，只读验证正式 Workflow、Profile Prompt、Role
+  集合以及固定 revision Skill，不 Claim 任务、不启动 Codex；
+- 自动化测试覆盖正式配置漂移、固定 Skill checkout、真实 PowerShell Clone/Checkout
+  和失败清理；
+- Runner 文档改为直接使用正式 `WORKFLOW.md`，并明确环境变量、启动前验收和常驻
+  Runner 命令。
+
+---
+
+## 10. 第九步：扩展完整研发链路
 
 核心闭环稳定后，再增加上游和下游角色。
 
@@ -833,7 +923,7 @@ PRD
 
 ---
 
-## 10. 权限模型
+## 11. 权限模型
 
 | Agent | 建议权限 |
 |---|---|
@@ -851,7 +941,7 @@ PRD
 
 ---
 
-## 11. 总任务清单
+## 12. 总任务清单
 
 | ID | 任务 | 优先级 | 依赖 |
 |---|---|---:|---|
@@ -882,6 +972,14 @@ PRD
 | UI-001 | Feature/WorkItem 看板 | P1 | ACP 稳定 |
 | UI-002 | Attempt 时间线 | P1 | ACP-004 |
 | UI-003 | 人工确认面板 | P1 | SKL-004 |
+| WFL-001 | 提交正式 WORKFLOW.md | P0 | SYM-003、SKL-003 |
+| WFL-002 | 固定 Workspace Clone/Checkout Hook | P0 | WFL-001 |
+| WFL-003 | 实现仓库级 Workflow 验收器 | P0 | WFL-001 |
+| WFL-004 | 验证正式 Profile Prompt 与 Skill | P0 | WFL-003 |
+| WFL-005 | 更新 Runner 启动与运维文档 | P0 | WFL-004 |
+| INT-001 | 统一 Requirement Intake API | P0 | WFL-005 |
+| INT-002 | UI 创建 Feature 和拆分预览 | P1 | INT-001 |
+| INT-003 | 外部 Issue 幂等导入 | P1 | INT-001 |
 | HARD-001 | 权限和秘密隔离 | P0 | SYM-004 |
 | HARD-002 | 重启恢复测试 | P0 | ACP-003 |
 | HARD-003 | 并发 Claim 测试 | P0 | ACP-003 |
@@ -889,14 +987,18 @@ PRD
 
 ---
 
-## 12. 启动顺序
+## 13. 启动顺序
 
-最先开始的两个开发阶段：
+最初的两个开发阶段：
 
 1. 完成 `ARC-001` 至 `ARC-005`，冻结协议和产物目录；
 2. 完成 `ACP-001` 至 `ACP-005`，实现没有复杂 UI 的最小控制面后端。
 
 这两步完成后再接入 Symphony，不反过来先修改 Symphony。
+
+截至 2026-08-04，协议、控制面、Windows Runner、Profile/Skill、端到端验证、最小
+UI 以及 `WFL-001` 至 `WFL-005` 已完成。下一阶段从 `INT-001` 统一
+Requirement Intake 开始，再开发 UI 创建需求和外部 Issue 导入。
 
 第一阶段完成标志不是“看板能打开”，而是可以用固定 Schema 和 API 人工走通：
 

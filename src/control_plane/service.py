@@ -85,6 +85,14 @@ class ControlPlaneService:
             raise NotFoundError(f"feature not found: {feature_id}")
         return FeatureView.model_validate(feature)
 
+    async def list_features(self) -> list[FeatureView]:
+        features = (
+            await self.session.scalars(
+                select(Feature).order_by(Feature.updated_at.desc(), Feature.id)
+            )
+        ).all()
+        return [FeatureView.model_validate(feature) for feature in features]
+
     async def create_work_item(self, command: WorkItemCreate) -> WorkItemView:
         async with self.session.begin():
             if await self.session.get(WorkItem, command.id):

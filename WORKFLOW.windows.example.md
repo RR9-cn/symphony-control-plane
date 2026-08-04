@@ -6,6 +6,7 @@ tracker:
     token: $CONTROL_PLANE_TOKEN
     worker_id: $SYMPHONY_WORKER_ID
     lease_seconds: 300
+    request_timeout_seconds: 30
 
 polling:
   interval_ms: 5000
@@ -14,10 +15,24 @@ workspace:
   root: ./.workspaces
 
 hooks:
-  timeout_ms: 60000
+  timeout_ms: 120000
   after_create: |
-    $repository = ($env:SYMPHONY_ISSUE_JSON | ConvertFrom-Json).repository.url
-    if ($repository) { git clone $repository . }
+    $ErrorActionPreference = "Stop"
+    $issue = $env:SYMPHONY_ISSUE_JSON | ConvertFrom-Json
+    $repository = [string]$issue.repository.url
+    $commit = [string]$issue.repository.commit
+    if ([string]::IsNullOrWhiteSpace($repository)) { throw "WorkItem repository.url is required" }
+    if ($commit -notmatch '^[0-9a-fA-F]{40}$') { throw "WorkItem repository.commit must be a full 40-character Git commit" }
+    & git clone --no-checkout -- $repository .
+    if ($LASTEXITCODE -ne 0) { throw "git clone failed with exit code $LASTEXITCODE" }
+    & git checkout --detach $commit
+    if ($LASTEXITCODE -ne 0) { throw "git checkout failed with exit code $LASTEXITCODE" }
+    $actual = (& git rev-parse HEAD).Trim().ToLowerInvariant()
+    if ($actual -ne $commit.ToLowerInvariant()) { throw "Workspace HEAD does not match WorkItem repository.commit" }
+  before_run: |
+    $ErrorActionPreference = "Stop"
+    & git rev-parse --is-inside-work-tree *> $null
+    if ($LASTEXITCODE -ne 0) { throw "WorkItem workspace is not a Git repository" }
 
 agent:
   max_concurrent_agents: 4
@@ -27,6 +42,7 @@ skill_repository:
   url: $FSHOWS_SKILLS_REPOSITORY
   revision: $FSHOWS_SKILLS_REVISION
   skills_path: skills
+  cache_root: ./.symphony-cache/skills
 
 agent_profiles:
   solution_architect:
@@ -97,6 +113,9 @@ codex:
   thread_sandbox: danger-full-access
   turn_sandbox_policy:
     type: dangerFullAccess
+  turn_timeout_ms: 3600000
+  read_timeout_ms: 5000
+  stall_timeout_ms: 300000
 ---
 
 You are working on WorkItem {{ issue.identifier }}.

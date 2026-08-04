@@ -12,7 +12,9 @@ alembic upgrade head
 python -m uvicorn control_plane.app:app --host 127.0.0.1 --port 8080
 ```
 
-默认数据库位于 `data/control-plane.db`。可复制 `.env.example` 修改路径和维护周期。Swagger UI 在本地服务的 `/docs`；使用浏览器打开前请遵守当前工作区的浏览器授权规则。
+默认数据库位于 `data/control-plane.db`。可复制 `.env.example` 修改路径和维护周期。管理看板位于 `/`，Swagger UI 位于 `/docs`；使用浏览器打开前请遵守当前工作区的浏览器授权规则。
+
+看板和 API 同源部署，不需要额外前端服务或 Node 构建。启用 `ACP_API_TOKEN` 后，在看板右上角“API 凭据”中输入相同 Token；页面只把凭据保存到当前标签页的 `sessionStorage`，关闭标签页后自动清除。
 
 ## SQLite 并发策略
 
@@ -29,6 +31,7 @@ python -m uvicorn control_plane.app:app --host 127.0.0.1 --port 8080
 
 ```text
 POST   /api/features
+GET    /api/features
 GET    /api/features/{id}
 
 POST   /api/work-items

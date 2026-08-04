@@ -2,10 +2,12 @@ import asyncio
 import contextlib
 import hmac
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated, AsyncIterator
 
 from fastapi import Depends, FastAPI, Query, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.config import Settings
@@ -33,6 +35,9 @@ from control_plane.schemas import (
     WorkItemView,
 )
 from control_plane.service import ControlPlaneService
+
+
+UI_ROOT = Path(__file__).with_name("ui")
 
 
 async def _lease_sweeper(app: FastAPI) -> None:
@@ -112,6 +117,16 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
     def service(session: AsyncSession) -> ControlPlaneService:
         return ControlPlaneService(session, resolved_settings)
 
+    app.mount("/ui/assets", StaticFiles(directory=UI_ROOT), name="ui-assets")
+
+    @app.get("/", include_in_schema=False, response_class=FileResponse)
+    async def dashboard() -> FileResponse:
+        return FileResponse(UI_ROOT / "index.html")
+
+    @app.get("/ui", include_in_schema=False, response_class=FileResponse)
+    async def dashboard_alias() -> FileResponse:
+        return FileResponse(UI_ROOT / "index.html")
+
     @app.get("/health")
     async def health() -> dict[str, object]:
         return {
@@ -126,6 +141,10 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
     )
     async def create_feature(command: FeatureCreate, session: Session) -> FeatureView:
         return await service(session).create_feature(command)
+
+    @app.get("/api/features", response_model=list[FeatureView])
+    async def list_features(session: Session) -> list[FeatureView]:
+        return await service(session).list_features()
 
     @app.get("/api/features/{feature_id}", response_model=FeatureView)
     async def get_feature(feature_id: str, session: Session) -> FeatureView:

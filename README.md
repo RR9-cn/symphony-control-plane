@@ -31,6 +31,20 @@
 - [Windows 原生 Symphony Runner](docs/windows-runner.md)
 - [可选 Symphony Elixir Adapter](integrations/symphony_elixir/README.md)
 
+## 管理看板
+
+启动控制面后访问根地址即可打开内置看板：
+
+```powershell
+python -m uvicorn control_plane.app:app --app-dir src --host 127.0.0.1 --port 8080
+```
+
+```text
+http://127.0.0.1:8080/
+```
+
+看板提供 Feature 筛选、WorkItem 状态列、Attempt/Event 时间线、Artifact、人工决策、阶段审批、返工、解阻、取消和重试维护操作。后端启用 `ACP_API_TOKEN` 时，可在页面右上角录入 Token；Token 只保存在当前浏览器标签页的 `sessionStorage`。
+
 ## 协议校验
 
 安装开发依赖后，可在仓库根目录执行：
@@ -39,9 +53,14 @@
 python -m pip install -r requirements-dev.txt
 python scripts/validate_protocol.py
 python scripts/validate_skills.py
+python scripts/validate_workflow.py .\WORKFLOW.md
 python -m pytest -q
 ```
 
+正式 Workflow 验收需要设置 `CONTROL_PLANE_TOKEN`、`FSHOWS_SKILLS_REPOSITORY`
+和完整 40 位 `FSHOWS_SKILLS_REVISION`。验收只读取配置、Profile Prompt 和固定
+Skill revision，不领取任务，也不启动 Codex。
+
 ## 当前状态
 
-实施方案前五步已实现。后端采用 SQLite，提供带 Bearer 认证的 WorkItem API、依赖候选查询、原子 Claim、Lease/Heartbeat、状态事件、Artifact、Agent Attempt 和人工决策。Windows 原生 Python Runner 可直接启动 Windows 版 `codex app-server`，实现安全工作区、PowerShell Hook、Profile 路由与限流、Heartbeat、指数退避和六个受限 Agent Tool，不依赖 WSL、Elixir 或 Mix。第五步增加固定 Git commit 的 Skill 仓库、Profile allowlist 物理注入、Skill 兼容性校验、Codex 用户 Skill 隔离、`skills/list` 启动验证、Skill revision/content hash 执行快照和 `NeedsHuman` 恢复闭环。Elixir 叠加层保留为可选兼容参考。
+实施方案前六步、第七步最小看板和第八步正式 Workflow 已实现。后端采用 SQLite，提供带 Bearer 认证的 WorkItem API、依赖候选查询、原子 Claim、Lease/Heartbeat、状态事件、Artifact、Agent Attempt 和人工决策。Windows 原生 Python Runner 可直接启动 Windows 版 `codex app-server`，实现安全工作区、PowerShell Hook、Profile 路由与限流、Heartbeat、指数退避、子 Agent Thread 连续性和六个受限 Agent Tool，不依赖 WSL、Elixir 或 Mix。根目录 `WORKFLOW.md` 固化五个 Profile、Workspace Clone/Commit Checkout、固定 Skill revision 和无人值守规则，并由只读验收器阻止 Role、Prompt 与 Skill 漂移。Skill 使用固定 Git commit、Profile allowlist 物理注入、兼容性校验、Codex 用户 Skill 隔离、`skills/list` 启动验证和 revision/content hash 执行快照。内置响应式看板用于观察完整研发链路并处理人工门禁。Elixir 叠加层保留为可选兼容参考。
