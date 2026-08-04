@@ -154,6 +154,16 @@ svg {
   gap: 10px;
 }
 
+.feature-delivery {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.feature-delivery a { color: var(--accent); }
+
 .connection-pill {
   display: flex;
   align-items: center;

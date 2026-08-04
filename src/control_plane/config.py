@@ -22,5 +22,6 @@ class Settings(BaseSettings):
     api_token: SecretStr | None = None
     worker_offline_after_seconds: int = Field(default=20, ge=5, le=3600)
     managed_runner_workflow: str = "WORKFLOW.md"
+    feature_workspace_root: str = ".workspaces"
     managed_runner_autostart: bool = False
     managed_runner_worker_id: str = "windows-symphony-managed"

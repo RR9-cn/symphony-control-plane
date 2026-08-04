@@ -236,8 +236,10 @@ async def test_windows_runner_drives_codex_and_completes_work_item(
         event for event in execution_events if event["item_type"] == "reasoning"
     )
     assert reasoning["detail"] is None
-    installed = tmp_path / "workspaces" / "WI-001" / ".agents" / "skills"
-    assert [path.name for path in installed.iterdir()] == ["fskill-analysis-tech"]
+    feature_workspace = tmp_path / "workspaces" / "FEATURE-001"
+    assert feature_workspace.is_dir()
+    assert not (tmp_path / "workspaces" / "WI-001").exists()
+    assert not (feature_workspace / ".agents").exists()
 
 
 async def test_bound_block_tool_releases_claim(

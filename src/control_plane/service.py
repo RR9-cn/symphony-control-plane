@@ -5,6 +5,7 @@ import hmac
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import Select, delete, exists, func, select, update
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from control_plane.config import Settings
+from control_plane.delivery import FeatureDeliveryManager
 from control_plane.errors import (
     AgentProfileConflictError,
     ClaimError,
@@ -51,6 +53,7 @@ from control_plane.schemas import (
     EventCreate,
     EventView,
     FeatureCreate,
+    FeatureDeliveryCommand,
     FeatureView,
     HeartbeatRequest,
     ManualIssueCreate,
@@ -181,6 +184,15 @@ class ControlPlaneService:
         self.session = session
         self.settings = settings
 
+    def _delivery_manager(self) -> FeatureDeliveryManager:
+        workflow_path = Path(self.settings.managed_runner_workflow).resolve()
+        workspace_root = Path(self.settings.feature_workspace_root)
+        if not workspace_root.is_absolute():
+            workspace_root = workflow_path.parent / workspace_root
+        return FeatureDeliveryManager(
+            str(workflow_path), workspace_root=workspace_root.resolve()
+        )
+
     async def create_feature(self, command: FeatureCreate) -> FeatureView:
         async with self.session.begin():
             if await self.session.get(Feature, command.id):
@@ -202,6 +214,129 @@ class ControlPlaneService:
             )
         ).all()
         return [FeatureView.model_validate(feature) for feature in features]
+
+    async def deliver_feature(
+        self, feature_id: str, command: FeatureDeliveryCommand
+    ) -> FeatureView:
+        manager = self._delivery_manager()
+        async with self.session.begin():
+            feature = await self.session.get(Feature, feature_id)
+            if feature is None:
+                raise NotFoundError(f"feature not found: {feature_id}")
+            if feature.version != command.expected_version:
+                raise ConflictError("feature version changed")
+            if command.action == "prepare_local_commit":
+                if feature.status != "active":
+                    raise ConflictError(
+                        f"feature cannot prepare delivery while status={feature.status}"
+                    )
+                test_done = await self.session.scalar(
+                    select(
+                        exists(
+                            select(1).where(
+                                WorkItem.feature_id == feature_id,
+                                WorkItem.agent_role == "test_executor",
+                                WorkItem.status == "done",
+                            )
+                        )
+                    )
+                )
+                if not test_done:
+                    raise ConflictError("Feature tests are not approved")
+                branch, commit = await manager.prepare_local_commit(
+                    feature.id, feature.title
+                )
+                result = await self.session.execute(
+                    update(Feature)
+                    .where(
+                        Feature.id == feature_id,
+                        Feature.version == command.expected_version,
+                        Feature.status == "active",
+                    )
+                    .values(
+                        status="awaiting_publish",
+                        head_branch=branch,
+                        local_commit=commit,
+                        version=Feature.version + 1,
+                        updated_at=utc_now(),
+                    )
+                )
+                if result.rowcount != 1:
+                    raise ConflictError("feature changed while preparing delivery")
+            elif command.action == "authorize_publish":
+                if feature.status != "awaiting_publish":
+                    raise ConflictError(
+                        f"feature cannot publish while status={feature.status}"
+                    )
+                if not feature.head_branch or not feature.local_commit:
+                    raise ConflictError("feature has no prepared local delivery commit")
+                repository = await self.session.scalar(
+                    select(WorkItem.repository)
+                    .where(WorkItem.feature_id == feature_id)
+                    .order_by(WorkItem.created_at)
+                    .limit(1)
+                )
+                if not isinstance(repository, dict):
+                    raise ConflictError("feature repository is unavailable")
+                pull_request = await manager.publish(
+                    feature.id,
+                    feature.title,
+                    repository,
+                    feature.head_branch,
+                    feature.local_commit,
+                )
+                result = await self.session.execute(
+                    update(Feature)
+                    .where(
+                        Feature.id == feature_id,
+                        Feature.version == command.expected_version,
+                        Feature.status == "awaiting_publish",
+                    )
+                    .values(
+                        status="pr_open",
+                        pull_request=pull_request,
+                        version=Feature.version + 1,
+                        updated_at=utc_now(),
+                    )
+                )
+                if result.rowcount != 1:
+                    raise ConflictError("feature changed while publishing")
+            else:
+                if feature.status != "pr_open" or not feature.pull_request:
+                    raise ConflictError(
+                        f"feature cannot confirm merge while status={feature.status}"
+                    )
+                await manager.verify_merged(feature.pull_request)
+                incomplete = await self.session.scalar(
+                    select(
+                        exists(
+                            select(1).where(
+                                WorkItem.feature_id == feature_id,
+                                WorkItem.status != "done",
+                            )
+                        )
+                    )
+                )
+                if incomplete:
+                    raise ConflictError("feature still has incomplete work items")
+                result = await self.session.execute(
+                    update(Feature)
+                    .where(
+                        Feature.id == feature_id,
+                        Feature.version == command.expected_version,
+                        Feature.status == "pr_open",
+                    )
+                    .values(
+                        status="done",
+                        merged_at=utc_now(),
+                        version=Feature.version + 1,
+                        updated_at=utc_now(),
+                    )
+                )
+                if result.rowcount != 1:
+                    raise ConflictError("feature changed while confirming merge")
+        self.session.expire(feature)
+        return await self.get_feature(feature_id)
 
     async def preview_manual_issue(
         self, command: ManualIssueCreate
@@ -441,6 +576,11 @@ class ControlPlaneService:
         return await self.get_work_item(item_id)
 
     async def candidates(self, limit: int = 100) -> list[WorkItemView]:
+        # Reconcile pipelines created before automatic dependency promotion was
+        # enabled (or interrupted between the dependency and ready events).
+        async with self.session.begin():
+            await self._propagate_completed_dependency_artifacts()
+            await self._promote_dependency_ready_drafts()
         incomplete = self._incomplete_dependency_exists()
         items = (
             await self.session.scalars(
@@ -922,6 +1062,28 @@ class ControlPlaneService:
                 self._verify_claim(item, command.claim_token)
             await self._validate_transition_guards(item, command)
 
+            prepared_delivery: tuple[str, str] | None = None
+            feature: Feature | None = None
+            if (
+                item.agent_role == "test_executor"
+                and from_status == "stage_review"
+                and command.to_status == "done"
+                and command.event == "stage_approved"
+            ):
+                feature = await self.session.get(Feature, item.feature_id)
+                if feature is None:
+                    raise NotFoundError(f"feature not found: {item.feature_id}")
+                if feature.status == "active":
+                    prepared_delivery = (
+                        await self._delivery_manager().prepare_local_commit(
+                            feature.id, feature.title
+                        )
+                    )
+                elif feature.status != "awaiting_publish":
+                    raise ConflictError(
+                        f"feature delivery is already status={feature.status}"
+                    )
+
             values: dict[str, Any] = {
                 "status": command.to_status,
                 "version": WorkItem.version + 1,
@@ -966,6 +1128,22 @@ class ControlPlaneService:
             )
             if command.to_status == "done":
                 await self._record_dependency_satisfied(item_id)
+            if prepared_delivery is not None and feature is not None:
+                branch, commit = prepared_delivery
+                feature.status = "awaiting_publish"
+                feature.head_branch = branch
+                feature.local_commit = commit
+                feature.version += 1
+                feature.updated_at = utc_now()
+                self._add_event(
+                    item_id,
+                    "feature_delivery_prepared",
+                    "control_plane",
+                    None,
+                    "done",
+                    "done",
+                    {"feature_id": feature.id, "branch": branch, "commit": commit},
+                )
             if from_status == "running" and command.to_status != "running":
                 await self._finish_latest_attempt(
                     item_id,
@@ -1469,6 +1647,139 @@ class ControlPlaneService:
                 None,
                 {"dependency_id": completed_id},
             )
+        await self._propagate_completed_dependency_artifacts(
+            dependent_ids, completed_id=completed_id
+        )
+        await self._promote_dependency_ready_drafts(
+            dependent_ids, trigger_dependency_id=completed_id
+        )
+
+    async def _propagate_completed_dependency_artifacts(
+        self,
+        dependent_ids: list[str] | None = None,
+        *,
+        completed_id: str | None = None,
+    ) -> None:
+        dependency = aliased(WorkItemDependency)
+        prerequisite = aliased(WorkItem)
+        dependent = aliased(WorkItem)
+        source_artifact = aliased(WorkItemArtifact)
+        statement = (
+            select(dependency.work_item_id, dependency.depends_on_id, source_artifact)
+            .join(prerequisite, prerequisite.id == dependency.depends_on_id)
+            .join(dependent, dependent.id == dependency.work_item_id)
+            .join(
+                source_artifact,
+                source_artifact.work_item_id == dependency.depends_on_id,
+            )
+            .where(
+                prerequisite.status == "done",
+                dependent.status.not_in(PROTOCOL.terminal_statuses),
+                source_artifact.direction.in_(("input", "output")),
+            )
+        )
+        if completed_id is not None:
+            statement = statement.where(dependency.depends_on_id == completed_id)
+        if dependent_ids is not None:
+            if not dependent_ids:
+                return
+            statement = statement.where(dependency.work_item_id.in_(dependent_ids))
+        bindings = (await self.session.execute(statement)).all()
+        if not bindings:
+            return
+
+        target_ids = {binding[0] for binding in bindings}
+        existing = set(
+            (
+                await self.session.execute(
+                    select(
+                        WorkItemArtifact.work_item_id,
+                        WorkItemArtifact.path,
+                        WorkItemArtifact.revision,
+                    ).where(
+                        WorkItemArtifact.work_item_id.in_(target_ids),
+                        WorkItemArtifact.direction == "input",
+                    )
+                )
+            ).all()
+        )
+        for dependent_id, source_id, artifact in bindings:
+            key = (dependent_id, artifact.path, artifact.revision)
+            if key in existing:
+                continue
+            linked = WorkItemArtifact(
+                work_item_id=dependent_id,
+                direction="input",
+                path=artifact.path,
+                revision=artifact.revision,
+                media_type=artifact.media_type,
+                sha256=artifact.sha256,
+                created_by_attempt_id=artifact.created_by_attempt_id,
+            )
+            self.session.add(linked)
+            existing.add(key)
+            self._add_event(
+                dependent_id,
+                "input_artifact_linked",
+                "control_plane",
+                None,
+                None,
+                None,
+                {
+                    "source_work_item_id": source_id,
+                    "source_artifact_id": artifact.id,
+                    "path": artifact.path,
+                    "revision": artifact.revision,
+                },
+            )
+
+    async def _promote_dependency_ready_drafts(
+        self,
+        dependent_ids: list[str] | None = None,
+        *,
+        trigger_dependency_id: str | None = None,
+    ) -> None:
+        dependency = aliased(WorkItemDependency)
+        has_dependency = exists(
+            select(1).where(dependency.work_item_id == WorkItem.id)
+        )
+        statement = select(WorkItem).where(
+            WorkItem.status == "draft",
+            has_dependency,
+            ~self._incomplete_dependency_exists(),
+        )
+        if dependent_ids is not None:
+            if not dependent_ids:
+                return
+            statement = statement.where(WorkItem.id.in_(dependent_ids))
+        dependents = (await self.session.scalars(statement)).all()
+        for dependent in dependents:
+            result = await self.session.execute(
+                update(WorkItem)
+                .where(
+                    WorkItem.id == dependent.id,
+                    WorkItem.status == "draft",
+                    WorkItem.version == dependent.version,
+                )
+                .values(
+                    status="ready",
+                    version=WorkItem.version + 1,
+                    updated_at=utc_now(),
+                )
+            )
+            if result.rowcount == 1:
+                payload: dict[str, Any] = {"reason": "dependencies_completed"}
+                if trigger_dependency_id is not None:
+                    payload["trigger_dependency_id"] = trigger_dependency_id
+                self._add_event(
+                    dependent.id,
+                    "work_item_readied",
+                    "control_plane",
+                    None,
+                    "draft",
+                    "ready",
+                    payload,
+                )
 
     async def _finish_latest_attempt(
         self,

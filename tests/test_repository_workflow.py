@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from scripts.validate_workflow import expected_roles, validate
+from symphony_windows.workflow import WorkspaceConfig
 from symphony_windows.workspace import WorkspaceError, WorkspaceManager, workspace_key
 
 
@@ -112,3 +114,33 @@ async def test_failed_formal_workspace_hook_leaves_no_partial_workspace(
         )
 
     assert not (workspace_root / workspace_key(identifier)).exists()
+
+
+def test_workspace_materializes_registered_dependency_artifacts(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspaces"
+    manager = WorkspaceManager(WorkspaceConfig(root=workspace_root))
+    source = workspace_root / workspace_key("WI-001")
+    target = workspace_root / workspace_key("WI-002")
+    relative = Path("orchestration/handoffs/WI-001.yaml")
+    source_file = source / relative
+    source_file.parent.mkdir(parents=True)
+    source_file.write_text("work_item_id: WI-001\n", encoding="utf-8")
+    target.mkdir(parents=True)
+    checksum = hashlib.sha256(source_file.read_bytes()).hexdigest()
+
+    materialized = manager.materialize_input_artifacts(
+        {
+            "dependencies": ["WI-001"],
+            "input_artifacts": [
+                {
+                    "path": relative.as_posix(),
+                    "revision": "attempt-1",
+                    "sha256": checksum,
+                }
+            ],
+        },
+        target,
+    )
+
+    assert materialized == (relative.as_posix(),)
+    assert (target / relative).read_bytes() == source_file.read_bytes()

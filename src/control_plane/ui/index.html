@@ -76,6 +76,11 @@
               <p id="feature-description">查看 Agent 执行状态、交接产物和人工决策。</p>
             </div>
             <div class="view-controls">
+              <div class="feature-delivery" id="feature-delivery" hidden>
+                <span id="feature-delivery-status"></span>
+                <button class="button button-primary" id="feature-publish-button" type="button" hidden>授权 Push / 创建 PR</button>
+                <button class="button button-primary" id="feature-merge-button" type="button" hidden>确认 PR 已合并</button>
+              </div>
               <label class="compact-search">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
                 <input id="work-item-search" type="search" placeholder="搜索工作项" autocomplete="off" />

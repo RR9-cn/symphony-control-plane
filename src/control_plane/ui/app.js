@@ -67,6 +67,8 @@ const EVENT_LABELS = {
   stage_rejected: "阶段被退回",
   rework_queued: "返工已排队",
   dependency_satisfied: "依赖已满足",
+  input_artifact_linked: "输入产物已关联",
+  feature_delivery_prepared: "Feature 本地 Commit 已生成",
   work_item_readied: "工作项已就绪",
   work_item_cancelled: "工作项已取消",
 };
@@ -101,6 +103,10 @@ const dom = {
   featureId: document.querySelector("#feature-id"),
   featureTitle: document.querySelector("#feature-title"),
   featureDescription: document.querySelector("#feature-description"),
+  featureDelivery: document.querySelector("#feature-delivery"),
+  featureDeliveryStatus: document.querySelector("#feature-delivery-status"),
+  featurePublishButton: document.querySelector("#feature-publish-button"),
+  featureMergeButton: document.querySelector("#feature-merge-button"),
   workItemSearch: document.querySelector("#work-item-search"),
   roleFilter: document.querySelector("#role-filter"),
   board: document.querySelector("#board"),
@@ -296,6 +302,20 @@ function renderHeader() {
   dom.featureTitle.textContent = feature?.title || "任务总览";
   dom.featureDescription.textContent =
     feature?.description || "查看 Agent 执行状态、交接产物和人工决策。";
+  dom.featureDelivery.hidden = !feature;
+  dom.featurePublishButton.hidden = feature?.status !== "awaiting_publish";
+  dom.featureMergeButton.hidden = feature?.status !== "pr_open";
+  const deliveryLabel = {
+    active: "研发中",
+    awaiting_publish: "本地 Commit 已就绪 · 等待发布授权",
+    pr_open: "PR 已创建 · 等待合并",
+    done: "PR 已合并 · Feature 完成",
+  }[feature?.status] || feature?.status || "";
+  const commit = feature?.local_commit ? ` · ${feature.local_commit.slice(0, 10)}` : "";
+  const pullRequest = feature?.pull_request
+    ? ` · <a href="${escapeHtml(feature.pull_request)}" target="_blank" rel="noreferrer">查看 PR</a>`
+    : "";
+  dom.featureDeliveryStatus.innerHTML = `${escapeHtml(deliveryLabel)}${escapeHtml(commit)}${pullRequest}`;
 }
 
 function renderMetrics(items) {
@@ -1054,6 +1074,32 @@ dom.runnerStopButton.addEventListener("click", async () => {
     toast(error.message, "error");
   }
 });
+
+async function runFeatureDelivery(action) {
+  const feature = state.features.find((item) => item.id === state.selectedFeatureId);
+  if (!feature) return;
+  const warning = action === "authorize_publish"
+    ? `确认授权将 ${feature.head_branch} Push 到远程并创建 Pull Request？`
+    : "确认 Pull Request 已合并？系统会向 GitHub 核验后才完成 Feature。";
+  if (!window.confirm(warning)) return;
+  try {
+    await api(`/api/features/${encodeURIComponent(feature.id)}/delivery`, {
+      method: "POST",
+      body: JSON.stringify({
+        action,
+        expected_version: feature.version,
+        authorization: true,
+      }),
+    });
+    toast(action === "authorize_publish" ? "Push 完成，Pull Request 已创建" : "PR 已核验合并，Feature 完成");
+    await refreshData();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+dom.featurePublishButton.addEventListener("click", () => runFeatureDelivery("authorize_publish"));
+dom.featureMergeButton.addEventListener("click", () => runFeatureDelivery("confirm_merge"));
 dom.refreshButton.addEventListener("click", () => refresh());
 dom.featureSearch.addEventListener("input", renderFeatures);
 dom.workItemSearch.addEventListener("input", renderBoard);

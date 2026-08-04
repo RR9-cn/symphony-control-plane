@@ -424,20 +424,25 @@ async def test_dependencies_gate_candidates_and_status_events(api) -> None:
         },
     )
     assert completed.status_code == 200, completed.text
+    still_waiting = (await api.get("/api/work-items/WI-002")).json()
+    assert still_waiting["status"] == "draft"
     approved = await api.post(
         "/api/work-items/WI-001/status",
         json={"to_status": "done", "event": "stage_approved", "actor_type": "human"},
     )
     assert approved.status_code == 200, approved.text
-    readied = await api.post(
-        "/api/work-items/WI-002/status",
-        json={
-            "to_status": "ready",
-            "event": "work_item_readied",
-            "actor_type": "control_plane",
-        },
-    )
-    assert readied.status_code == 200, readied.text
+
+    readied = (await api.get("/api/work-items/WI-002")).json()
+    assert readied["status"] == "ready"
+    assert readied["version"] == 2
+    assert readied["input_artifacts"] == [
+        {
+            "path": "orchestration/handoffs/WI-001.yaml",
+            "revision": "abc1234",
+            "media_type": None,
+            "sha256": None,
+        }
+    ]
 
     candidates = (await api.get("/api/work-items/candidates")).json()
     assert [item["id"] for item in candidates] == ["WI-002"]
@@ -453,7 +458,16 @@ async def test_dependencies_gate_candidates_and_status_events(api) -> None:
         "stage_approved",
     ]
     dependent_events = (await api.get("/api/work-items/WI-002/events")).json()
-    assert "dependency_satisfied" in [event["event_type"] for event in dependent_events]
+    assert [event["event_type"] for event in dependent_events] == [
+        "created",
+        "dependency_satisfied",
+        "input_artifact_linked",
+        "work_item_readied",
+    ]
+    assert dependent_events[-1]["payload"] == {
+        "reason": "dependencies_completed",
+        "trigger_dependency_id": "WI-001",
+    }
 
 
 async def test_concurrent_claim_allows_exactly_one_winner(api) -> None:
@@ -475,6 +489,95 @@ async def test_concurrent_claim_allows_exactly_one_winner(api) -> None:
     )
     events = (await api.get("/api/work-items/WI-001/events")).json()
     assert [event["event_type"] for event in events].count("claimed") == 1
+
+
+async def test_test_approval_prepares_feature_and_delivery_requires_merge(
+    api, monkeypatch
+) -> None:
+    async def prepare_local_commit(_manager, feature_id: str, _title: str):
+        assert feature_id == "FEATURE-001"
+        return "codex/feature-001", "c" * 40
+
+    async def publish(_manager, feature_id, _title, _repository, branch, commit):
+        assert (feature_id, branch, commit) == (
+            "FEATURE-001",
+            "codex/feature-001",
+            "c" * 40,
+        )
+        return "https://github.com/example/repository/pull/1"
+
+    async def verify_merged(_manager, pull_request: str):
+        assert pull_request.endswith("/pull/1")
+
+    monkeypatch.setattr(
+        "control_plane.service.FeatureDeliveryManager.prepare_local_commit",
+        prepare_local_commit,
+    )
+    monkeypatch.setattr(
+        "control_plane.service.FeatureDeliveryManager.publish", publish
+    )
+    monkeypatch.setattr(
+        "control_plane.service.FeatureDeliveryManager.verify_merged", verify_merged
+    )
+
+    payload = work_item_payload("WI-005", status="ready")
+    payload.update(stage="test_execution", agent_role="test_executor")
+    await create_fixture(api, payload)
+    claim = await api.post(
+        "/api/work-items/WI-005/claim",
+        json={"worker_id": "tester", "expected_version": 1, "lease_seconds": 60},
+    )
+    token = claim.json()["claim_token"]
+    await api.post(
+        "/api/work-items/WI-005/artifacts",
+        json={
+            "direction": "output",
+            "path": "orchestration/handoffs/WI-005.yaml",
+            "revision": "test-attempt",
+            "claim_token": token,
+        },
+    )
+    completed = await api.post(
+        "/api/work-items/WI-005/status",
+        json={
+            "to_status": "stage_review",
+            "event": "agent_completed",
+            "claim_token": token,
+        },
+    )
+    assert completed.status_code == 200, completed.text
+    approved = await api.post(
+        "/api/work-items/WI-005/status",
+        json={"to_status": "done", "event": "stage_approved", "actor_type": "human"},
+    )
+    assert approved.status_code == 200, approved.text
+
+    feature = (await api.get("/api/features/FEATURE-001")).json()
+    assert feature["status"] == "awaiting_publish"
+    assert feature["head_branch"] == "codex/feature-001"
+    assert feature["local_commit"] == "c" * 40
+
+    published = await api.post(
+        "/api/features/FEATURE-001/delivery",
+        json={
+            "action": "authorize_publish",
+            "expected_version": feature["version"],
+            "authorization": True,
+        },
+    )
+    assert published.status_code == 200, published.text
+    assert published.json()["status"] == "pr_open"
+    merged = await api.post(
+        "/api/features/FEATURE-001/delivery",
+        json={
+            "action": "confirm_merge",
+            "expected_version": published.json()["version"],
+            "authorization": True,
+        },
+    )
+    assert merged.status_code == 200, merged.text
+    assert merged.json()["status"] == "done"
+    assert merged.json()["merged_at"] is not None
 
 
 async def test_feature_root_handoff_satisfies_completion_guard(api) -> None:

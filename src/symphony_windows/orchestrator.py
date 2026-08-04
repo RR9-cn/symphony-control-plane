@@ -206,13 +206,18 @@ class WindowsSymphony:
     ) -> AttemptOutcome:
         item_id = lease.id
         workspace = None
+        skills_installed = False
         heartbeat_task: asyncio.Task[None] | None = None
         codex_task: asyncio.Task[CodexRunResult] | None = None
         try:
             issue = _normalize_issue(lease.item)
             prepared = await self.workspace_manager.prepare(issue)
             workspace = prepared.path
+            materialized_inputs = self.workspace_manager.materialize_input_artifacts(
+                issue, workspace
+            )
             profile_snapshot = self.skill_manager.install(profile, workspace)
+            skills_installed = True
             await self.workspace_manager.before_run(issue, workspace)
             event = await self.tracker.execute_tool(
                 lease,
@@ -239,6 +244,14 @@ class WindowsSymphony:
             ):
                 attempt_number = lease.attempt["attempt_number"]
             prompt = profile.render_prompt(issue, attempt_number)
+            if materialized_inputs:
+                prompt = (
+                    "The following registered input artifacts have been materialized "
+                    "in this WorkItem workspace and are authoritative:\n"
+                    + "\n".join(f"- {path}" for path in materialized_inputs)
+                    + "\n\n"
+                    + prompt
+                )
             if lease.resume_thread_id is not None:
                 prompt = (
                     "Continue the existing WorkItem in this resumed Codex thread. "
@@ -372,6 +385,9 @@ class WindowsSymphony:
                 with contextlib.suppress(asyncio.CancelledError):
                     await heartbeat_task
             if workspace is not None:
+                if skills_installed:
+                    with contextlib.suppress(WorkflowError, OSError):
+                        self.skill_manager.restore(workspace)
                 with contextlib.suppress(WorkspaceError):
                     await self.workspace_manager.after_run(
                         _normalize_issue(lease.item), workspace
@@ -448,6 +464,9 @@ class WindowsSymphony:
 def _normalize_issue(item: dict[str, Any]) -> dict[str, Any]:
     issue = dict(item)
     issue["identifier"] = str(item.get("identifier") or item.get("id") or "")
+    issue["workspace_identifier"] = str(
+        item.get("feature_id") or issue["identifier"]
+    )
     issue["state"] = str(item.get("status") or "")
     issue["labels"] = [
         f"agent/{item.get('agent_role')}",

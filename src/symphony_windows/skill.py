@@ -127,8 +127,17 @@ class SkillManager:
         self._require_initialized()
         root = workspace.resolve()
         agents_root = root / ".agents"
+        backup_root = root / ".symphony" / "profile-assets-backup"
         if agents_root.exists() and agents_root.is_symlink():
             raise SkillError(f"workspace .agents directory must not be a symlink: {agents_root}")
+        if backup_root.exists():
+            self._restore_backup(root, agents_root, backup_root)
+        backup_root.parent.mkdir(parents=True, exist_ok=True)
+        if agents_root.exists():
+            shutil.copytree(agents_root, backup_root)
+        else:
+            backup_root.mkdir()
+            (backup_root / ".originally-absent").touch()
         agents_root.mkdir(parents=True, exist_ok=True)
         if not agents_root.resolve().is_relative_to(root):
             raise SkillError("workspace .agents directory escapes the workspace")
@@ -161,6 +170,27 @@ class SkillManager:
             encoding="utf-8",
         )
         return lock
+
+    def restore(self, workspace: Path) -> None:
+        root = workspace.resolve()
+        agents_root = root / ".agents"
+        backup_root = root / ".symphony" / "profile-assets-backup"
+        if backup_root.exists():
+            self._restore_backup(root, agents_root, backup_root)
+
+    @staticmethod
+    def _restore_backup(root: Path, agents_root: Path, backup_root: Path) -> None:
+        if not backup_root.resolve().is_relative_to(root):
+            raise SkillError("workspace Skill backup escapes the workspace")
+        originally_absent = (backup_root / ".originally-absent").exists()
+        if agents_root.exists():
+            if agents_root.is_symlink() or not agents_root.resolve().is_relative_to(root):
+                raise SkillError("workspace .agents directory is unsafe")
+            shutil.rmtree(agents_root)
+        if originally_absent:
+            shutil.rmtree(backup_root)
+        else:
+            backup_root.replace(agents_root)
 
     async def _checkout_revision(self) -> Path:
         source_key = hashlib.sha256(

@@ -9,7 +9,6 @@ global_guards:
     - destructive_cleanup
   forbidden_for_all_roles:
     - expose_host_credentials_to_agent
-    - depend_on_uncommitted_previous_workspace
 
 roles:
   solution_architect:
@@ -147,3 +146,17 @@ roles:
     human_confirmation_triggers:
       - 测试全部通过，等待人工最终验收。
       - 需要访问共享环境、敏感测试数据或外部写接口。
+
+feature_delivery:
+  workspace_scope: feature
+  local_commit_after: test_executor_stage_approved
+  states:
+    - active
+    - awaiting_publish
+    - pr_open
+    - done
+  human_authorization:
+    - git_push
+    - pull_request_create
+    - merge_confirmation
+  completion_rule: PR 已经由 Provider 核验合并后，Feature 才能进入 done。

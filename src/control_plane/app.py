@@ -31,6 +31,7 @@ from control_plane.schemas import (
     EventCreate,
     EventView,
     FeatureCreate,
+    FeatureDeliveryCommand,
     FeatureView,
     HeartbeatRequest,
     ManualIssueCreate,
@@ -212,6 +213,12 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
     @app.get("/api/features/{feature_id}", response_model=FeatureView)
     async def get_feature(feature_id: str, session: Session) -> FeatureView:
         return await service(session).get_feature(feature_id)
+
+    @app.post("/api/features/{feature_id}/delivery", response_model=FeatureView)
+    async def deliver_feature(
+        feature_id: str, command: FeatureDeliveryCommand, session: Session
+    ) -> FeatureView:
+        return await service(session).deliver_feature(feature_id, command)
 
     @app.post("/api/repositories/resolve-head", response_model=RepositoryHeadView)
     async def resolve_repository_head(command: RepositoryHeadRequest) -> RepositoryHeadView:

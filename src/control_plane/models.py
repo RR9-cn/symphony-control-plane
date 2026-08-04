@@ -41,10 +41,25 @@ class Base(DeclarativeBase):
 
 class Feature(Base):
     __tablename__ = "features"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'awaiting_publish', 'pr_open', 'done')",
+            name="ck_features_status",
+        ),
+        CheckConstraint("version >= 1", name="ck_features_version"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     title: Mapped[str] = mapped_column(String(200))
     description: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(32), default="active")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    head_branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    local_commit: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    pull_request: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    merged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now

@@ -49,8 +49,28 @@ class FeatureCreate(ApiModel):
 
 
 class FeatureView(FeatureCreate):
+    status: Literal["active", "awaiting_publish", "pr_open", "done"]
+    version: int
+    head_branch: str | None
+    local_commit: str | None
+    pull_request: str | None
+    merged_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class FeatureDeliveryCommand(ApiModel):
+    action: Literal["prepare_local_commit", "authorize_publish", "confirm_merge"]
+    expected_version: int = Field(
+        validation_alias=AliasChoices("expected_version", "expectedVersion"), ge=1
+    )
+    authorization: bool = False
+
+    @model_validator(mode="after")
+    def require_authorization(self) -> "FeatureDeliveryCommand":
+        if self.action != "prepare_local_commit" and not self.authorization:
+            raise ValueError("explicit delivery authorization is required")
+        return self
 
 
 class ManualIssueCreate(ApiModel):

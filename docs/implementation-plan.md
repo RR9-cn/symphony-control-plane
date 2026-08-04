@@ -1034,10 +1034,35 @@ Attempt 因 Needs Human 结束，人工回复后的新 Claim 会携带全部已�
 Retry 或新会话中丢失结论或重复询问。Needs Human 与 Retry 复用原 Thread；环境类
 Blocked 解阻后启动新 Thread，避免沿用已经固化错误运行根的旧 Session。
 
-Thread 必须把当前 WorkItem Workspace 的规范化绝对路径显式写入
+Thread 必须把当前 Feature Workspace 的规范化绝对路径显式写入
 `runtimeWorkspaceRoots`，`workspaceWrite` Turn 同时写入
 `sandboxPolicy.writableRoots`。不能只依赖 `cwd` 隐式推断，否则 Codex App Server 可能
 把受管 Workspace 判定为 project 外部并拒绝 `apply_patch`，或拒绝 Shell 写入。
+
+### 11.6 Feature 共享 Workspace 与交付闭环（2026-08-04）
+
+Symphony 规格中的调度单位是 Issue；本项目的 Issue 对应 `Feature`，而不是拆分后的单个
+`WorkItem`。因此 Workspace 必须按 `Feature.id` 确定，Solution Architect、Backend、
+Review、Test Designer 和 Test Executor 在同一持久 Git Workspace 和累计变更集上串行
+工作。Profile Skill 只在 Agent 运行期间安装，结束后恢复原始 `.agents`，不能污染业务
+代码差异或最终 Commit。
+
+Feature 交付状态为：
+
+```text
+active
+→ Test Executor Stage Review 通过
+→ 创建 codex/<feature> 本地 Commit
+→ awaiting_publish
+→ 人工授权 Push 与创建 PR
+→ pr_open
+→ PR 在 Provider 侧核验为 MERGED
+→ done
+```
+
+WorkItem `done` 只表示该阶段交接完成，不等于 Feature 已交付。`git push`、创建 PR 和合并
+确认是三个显式外部写入门禁；没有用户授权不得执行。Feature 只有在 PR 被 GitHub CLI
+核验为已合并后才能进入 `done`。隔离 Workspace 的改动不得直接复制覆盖原项目工作树。
 
 ---
 

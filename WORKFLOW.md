@@ -163,8 +163,9 @@ Acceptance criteria:
 
 Execution rules:
 
-1. Work only inside the provided WorkItem workspace and follow the selected
-   Agent Profile and its allowed Skills.
+1. Work only inside the provided Feature workspace and follow the selected
+   Agent Profile and its allowed Skills. Every WorkItem in the same Feature
+   shares this persistent Git workspace and cumulative change set.
 2. Treat the WorkItem, registered input Artifacts, repository commit, and prior
    Handoffs as the authoritative execution context.
 3. Use only the bound `work_item_*` tools for Control Plane writes. Never expose
@@ -184,6 +185,10 @@ Execution rules:
    that Handoff as an output Artifact.
 9. A successful Codex Turn is not sufficient by itself. The WorkItem is handed
    off only through the bound completion tool and then waits for Stage Review.
+10. Do not create independent per-stage clones. Backend, Review and Test stages
+    must inspect the same Feature workspace. After the Test Executor is approved,
+    the Control Plane creates the local delivery commit; Push, PR creation and
+    merge remain explicit human-authorized Feature delivery gates.
 
 {% if attempt %}
 This is continuation or retry attempt {{ attempt }}. Reuse the current Workspace
