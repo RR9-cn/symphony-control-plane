@@ -86,7 +86,7 @@ def main() -> int:
     state_path = (
         Path(os.environ["FAKE_CODEX_STATE_FILE"]) if mode == "continuation" else None
     )
-    is_resumed = state_path is not None and state_path.exists()
+    is_resumed = mode == "resume" or (state_path is not None and state_path.exists())
     thread = read_message()
     assert thread["method"] == ("thread/resume" if is_resumed else "thread/start")
     assert thread["params"]["sandbox"] == "workspace-write"

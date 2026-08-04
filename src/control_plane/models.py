@@ -175,6 +175,27 @@ class AgentProfile(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class Worker(Base):
+    __tablename__ = "workers"
+    __table_args__ = (Index("ix_workers_last_seen", "last_seen_at"),)
+
+    id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    hostname: Mapped[str] = mapped_column(String(255))
+    process_id: Mapped[int] = mapped_column(Integer)
+    version: Mapped[str] = mapped_column(String(50))
+    capacity: Mapped[int] = mapped_column(Integer)
+    profiles: Mapped[list[str]] = mapped_column(JSON_VALUE, default=list)
+    active_work_items: Mapped[list[str]] = mapped_column(JSON_VALUE, default=list)
+    active_profiles: Mapped[dict[str, str]] = mapped_column(JSON_VALUE, default=dict)
+    state: Mapped[str] = mapped_column(String(32), default="starting")
+    stop_requested: Mapped[bool] = mapped_column(default=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    stopped_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
 class AgentAttempt(Base):
     __tablename__ = "agent_attempts"
     __table_args__ = (
@@ -193,6 +214,7 @@ class AgentAttempt(Base):
     profile_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON_VALUE, default=dict)
     status: Mapped[str] = mapped_column(String(32), default="running")
     thread_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    turn_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

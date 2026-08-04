@@ -20,3 +20,7 @@ class Settings(BaseSettings):
     default_retry_delay_seconds: int = Field(default=5, ge=0)
     enable_lease_sweeper: bool = True
     api_token: SecretStr | None = None
+    worker_offline_after_seconds: int = Field(default=20, ge=5, le=3600)
+    managed_runner_workflow: str = "WORKFLOW.md"
+    managed_runner_autostart: bool = False
+    managed_runner_worker_id: str = "windows-symphony-managed"

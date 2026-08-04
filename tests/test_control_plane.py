@@ -6,7 +6,7 @@ from datetime import timedelta
 
 from sqlalchemy import update
 
-from control_plane.models import WorkItem, utc_now
+from control_plane.models import WorkItem, Worker, utc_now
 
 from conftest import feature_payload, work_item_payload
 
@@ -25,6 +25,7 @@ async def test_dashboard_and_feature_list(api) -> None:
     assert "Fshows Agent Control Plane" in dashboard.text
     assert "/ui/assets/app.js" in dashboard.text
     assert "手工录入 Issue" in dashboard.text
+    assert "Agent 状态中心" in dashboard.text
 
     stylesheet = await api.get("/ui/assets/styles.css")
     assert stylesheet.status_code == 200
@@ -33,6 +34,10 @@ async def test_dashboard_and_feature_list(api) -> None:
     assert javascript.status_code == 200
     assert "/api/intake/manual/issues/preview" in javascript.text
     assert "/api/repositories/resolve-head" in javascript.text
+    assert "/api/runner-control/start" in javascript.text
+    runner_control = await api.get("/api/runner-control")
+    assert runner_control.status_code == 200
+    assert runner_control.json()["state"] == "stopped"
 
     for feature in (
         feature_payload(),
@@ -99,6 +104,125 @@ async def test_resolve_repository_head_rejects_non_local_or_invalid_path(api, tm
         "/api/repositories/resolve-head", json={"path": str(non_repository)}
     )
     assert invalid.status_code == 422
+
+
+async def test_worker_registration_heartbeat_and_control(api) -> None:
+    registered = await api.post(
+        "/api/workers/register",
+        json={
+            "workerId": "windows-runner-01",
+            "hostname": "test-host",
+            "processId": 1234,
+            "version": "0.1.0",
+            "capacity": 4,
+            "profiles": ["solution_architect", "backend_builder"],
+        },
+    )
+    assert registered.status_code == 200, registered.text
+    assert registered.json()["state"] == "starting"
+
+    heartbeat = await api.post(
+        "/api/workers/windows-runner-01/heartbeat",
+        json={
+            "state": "running",
+            "activeWorkItems": ["WI-001"],
+            "activeProfiles": {"WI-001": "solution_architect"},
+        },
+    )
+    assert heartbeat.status_code == 200, heartbeat.text
+    assert heartbeat.json()["active_work_items"] == ["WI-001"]
+
+    stop_requested = await api.post(
+        "/api/workers/windows-runner-01/request-stop", json={}
+    )
+    assert stop_requested.status_code == 200, stop_requested.text
+    assert stop_requested.json()["stop_requested"] is True
+
+    observed = await api.post(
+        "/api/workers/windows-runner-01/heartbeat",
+        json={
+            "state": "running",
+            "activeWorkItems": ["WI-001"],
+            "activeProfiles": {"WI-001": "solution_architect"},
+        },
+    )
+    assert observed.json()["stop_requested"] is True
+
+    stopped = await api.post("/api/workers/windows-runner-01/stopped", json={})
+    assert stopped.status_code == 200, stopped.text
+    assert stopped.json()["state"] == "stopped"
+    assert stopped.json()["active_work_items"] == []
+
+
+async def test_worker_is_reported_offline_after_heartbeat_deadline(api) -> None:
+    registered = await api.post(
+        "/api/workers/register",
+        json={
+            "workerId": "offline-runner",
+            "hostname": "test-host",
+            "processId": 4321,
+            "version": "0.1.0",
+            "capacity": 2,
+            "profiles": ["solution_architect"],
+        },
+    )
+    assert registered.status_code == 200, registered.text
+    async with api.app.state.database.sessions() as session:
+        async with session.begin():
+            await session.execute(
+                update(Worker)
+                .where(Worker.id == "offline-runner")
+                .values(last_seen_at=utc_now() - timedelta(seconds=30))
+            )
+    workers = (await api.get("/api/workers")).json()
+    assert workers[0]["state"] == "offline"
+
+
+async def test_agent_runtime_tracks_thread_turn_and_human_gate(api) -> None:
+    await create_fixture(api, work_item_payload("WI-001", status="ready"))
+    claim = await api.post(
+        "/api/work-items/WI-001/claim",
+        json={"workerId": "runner-01", "expectedVersion": 1, "leaseSeconds": 60},
+    )
+    assert claim.status_code == 200, claim.text
+    token = claim.json()["claim_token"]
+
+    context = await api.post(
+        "/api/work-items/WI-001/attempt-context",
+        json={
+            "claimToken": token,
+            "threadId": "thread-runtime-01",
+            "turnId": "turn-runtime-01",
+        },
+    )
+    assert context.status_code == 200, context.text
+    assert context.json()["thread_id"] == "thread-runtime-01"
+    assert context.json()["turn_id"] == "turn-runtime-01"
+
+    running = (await api.get("/api/agent-runtimes")).json()
+    assert len(running) == 1
+    assert running[0]["state"] == "running"
+    assert running[0]["worker_id"] == "runner-01"
+    assert running[0]["thread_id"] == "thread-runtime-01"
+
+    decision = await api.post(
+        "/api/work-items/WI-001/decisions",
+        json={
+            "action": "request",
+            "question": "Choose a safe behavior",
+            "options": ["A", "B"],
+            "actor_id": "codex",
+            "claimToken": token,
+            "threadId": "thread-runtime-01",
+        },
+    )
+    assert decision.status_code == 200, decision.text
+    waiting = (await api.get("/api/agent-runtimes")).json()
+    assert waiting[0]["state"] == "waiting_human"
+    assert waiting[0]["thread_id"] == "thread-runtime-01"
+    attempts = (await api.get("/api/work-items/WI-001/attempts")).json()
+    assert attempts[0]["status"] == "needs_human"
+    assert attempts[0]["thread_id"] == "thread-runtime-01"
 
 
 async def test_manual_issue_preview_and_atomic_creation(api) -> None:

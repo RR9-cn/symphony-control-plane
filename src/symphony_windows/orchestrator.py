@@ -60,9 +60,12 @@ class WindowsSymphony:
         self._retry_attempts: dict[str, int] = {}
         self._closed = False
         self._initialized = False
+        self._registered = False
+        self._stop_requested = False
 
     async def __aenter__(self) -> "WindowsSymphony":
         await self._ensure_initialized()
+        await self._register_worker()
         return self
 
     async def __aexit__(self, *_args: object) -> None:
@@ -72,10 +75,15 @@ class WindowsSymphony:
         if self._closed:
             raise RuntimeError("WindowsSymphony is closed")
         await self._ensure_initialized()
+        await self._register_worker()
         self._reap_finished()
+        await self._heartbeat_worker()
+        if self._stop_requested:
+            return []
         await self.tracker.maintenance_tick()
         available = self.workflow.agent.max_concurrent_agents - len(self._running)
         if available <= 0:
+            await self._heartbeat_worker()
             return []
         candidates = await self.tracker.candidates(limit=max(available * 4, available))
         candidates.sort(key=_dispatch_key)
@@ -136,6 +144,7 @@ class WindowsSymphony:
             self._running_profiles[item_id] = profile.name
             dispatched.append(item_id)
             logger.info("dispatched WorkItem %s", item_id)
+        await self._heartbeat_worker()
         return dispatched
 
     async def run_once(self) -> list[AttemptOutcome]:
@@ -154,6 +163,9 @@ class WindowsSymphony:
                     await self.tick()
                 except TrackerError:
                     logger.exception("poll tick failed")
+                if self._stop_requested:
+                    logger.info("worker stop requested by Control Plane")
+                    break
                 await asyncio.sleep(self.workflow.polling_interval_ms / 1000)
         except asyncio.CancelledError:
             raise
@@ -165,6 +177,10 @@ class WindowsSymphony:
             return
         self._closed = True
         await self._stop_running()
+        if self._registered:
+            with contextlib.suppress(TrackerError):
+                await self.tracker.worker_stopped()
+            self._registered = False
         if self._owns_tracker:
             await self.tracker.close()
 
@@ -365,6 +381,28 @@ class WindowsSymphony:
             return
         await self.skill_manager.initialize()
         self._initialized = True
+
+    async def _register_worker(self) -> None:
+        if self._registered:
+            return
+        await self.tracker.register_worker(
+            capacity=self.workflow.agent.max_concurrent_agents,
+            profiles=sorted(profile.name for profile in self.workflow.agent_profiles),
+        )
+        self._registered = True
+
+    async def _heartbeat_worker(self) -> None:
+        active_profiles = {
+            item_id: profile
+            for item_id, profile in self._running_profiles.items()
+            if profile is not None
+            and item_id in self._running
+            and not self._running[item_id].done()
+        }
+        worker = await self.tracker.heartbeat_worker(
+            active_profiles=active_profiles
+        )
+        self._stop_requested = worker.get("stop_requested") is True
 
     async def _stop_running(self) -> None:
         tasks = [task for task in self._running.values() if not task.done()]

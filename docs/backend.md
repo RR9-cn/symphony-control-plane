@@ -56,6 +56,15 @@ GET    /api/work-items/{id}/decisions
 GET    /api/work-items/{id}/attempts
 
 GET    /api/agent-profiles
+GET    /api/workers
+POST   /api/workers/register
+POST   /api/workers/{worker_id}/heartbeat
+POST   /api/workers/{worker_id}/request-stop
+POST   /api/workers/{worker_id}/stopped
+GET    /api/agent-runtimes
+GET    /api/runner-control
+POST   /api/runner-control/start
+POST   /api/runner-control/stop
 
 POST   /api/maintenance/tick
 GET    /health
@@ -67,6 +76,11 @@ GET    /health
 也不接受相对路径。`preview` 只生成固定五阶段拆分草案，不写数据库；确认接口在一个
 事务中创建 Feature、五个串行依赖的 WorkItem 和审计事件，只把第一个
 Solution Architect 工作项置为 `ready`。本期不连接或同步外部 Issue 平台。
+
+Windows Runner 启动时向 `/api/workers/register` 注册，并在空闲和执行期间持续心跳。
+`/api/agent-runtimes` 把 WorkItem 与最新 Attempt 合并为 Agent 视角状态；Thread 和
+Turn 通过 `attempt-context` 在运行中实时登记。`runner-control` 只管理与当前控制面
+同机的托管 Runner，不远程启动其他宿主机进程。
 
 `claim` 请求兼容协议示例中的 camelCase：
 

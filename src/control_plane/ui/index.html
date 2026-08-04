@@ -114,6 +114,22 @@
             </article>
           </section>
 
+          <section class="agent-panel" aria-label="Agent 运行状态">
+            <div class="section-heading agent-panel-heading">
+              <div>
+                <span class="eyebrow">Agent runtime</span>
+                <h3>Agent 状态中心</h3>
+              </div>
+              <div class="runner-controls">
+                <span class="runner-state" id="runner-state"><span class="status-dot"></span><strong>Runner 未启动</strong></span>
+                <button class="button button-secondary" id="runner-start-button" type="button">启动 Runner</button>
+                <button class="button button-ghost" id="runner-stop-button" type="button" disabled>停止</button>
+              </div>
+            </div>
+            <div class="worker-list" id="worker-list"></div>
+            <div class="agent-runtime-list" id="agent-runtime-list"></div>
+          </section>
+
           <section class="board-panel">
             <div class="section-heading">
               <div>

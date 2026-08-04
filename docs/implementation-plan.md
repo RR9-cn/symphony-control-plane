@@ -947,17 +947,70 @@ Feature ID 或生成的 WorkItem ID 冲突时整体失败，不允许产生半�
 
 ---
 
-## 11. 第十步：扩展完整研发链路
+## 11. 第十步：Runner 运维与 Agent 可观测性
+
+手工 Issue 能产生候选任务后，优先补齐执行面的长期运行与可观测闭环，不立即扩展
+外部 Issue Provider 或更多研发角色。Symphony Runner 是长期轮询服务，不按 Issue
+临时创建一次性进程；控制面必须能够区分“任务 Ready”和“Worker 在线并已领取”。
+
+### 11.1 Worker 生命周期
+
+- Runner 启动时注册 Worker ID、宿主机、PID、版本、并发容量和 Profile 集合；
+- 空闲和执行期间持续上报 Worker 心跳、当前 WorkItem 与 Profile；
+- 超过离线阈值未心跳时由查询端标记 `offline`，不覆盖最后一次执行快照；
+- 控制面可以请求优雅停止，Runner 停止领取新任务并安全释放执行中的 Claim；
+- Windows 本地部署提供受控 Runner Supervisor，支持 UI 启动、停止和查看最近日志。
+
+### 11.2 Agent Runtime
+
+Agent Runtime 以 WorkItem 的最新 Attempt 为事实来源，展示：
+
+- `waiting_dependency`、`ready`、`starting`、`running`；
+- `waiting_human`、`reviewing`、`retrying`、`rework`、`blocked`；
+- `completed`、`cancelled`；
+- Worker、Profile、Attempt、Codex Thread/Turn 和启动时间。
+
+Codex 创建 Thread 和 Turn 后立即更新 Attempt 上下文，不能只在 WorkItem 结束时补写，
+从而避免实际已经运行但 UI 长时间显示“正在准备”。人工门禁必须保留 Thread ID，人工
+回复后 Runner 才能延续原上下文。
+
+### 11.3 完成标准
+
+- UI 以 Agent 状态为第一视角，同时保留 WorkItem 看板；
+- 没有 Runner 时 Ready 明确显示为“尚未分配 Worker”；
+- Runner 空闲时仍在线，停止或异常退出后可识别；
+- UI 可启动和优雅停止本机托管 Runner；
+- Thread/Turn 在执行中可见，Needs Human 能关联原 Thread；
+- 自动化测试覆盖 Worker 注册、心跳、停止请求、Attempt 上下文和运行态映射；
+- Runner 重启不会重复执行有效 Lease，恢复规则继续遵守正式 `WORKFLOW.md`。
+
+### 11.4 实现结果（2026-08-04）
+
+- 新增 Worker SQLite 表和迁移，记录 Runner 身份、宿主、PID、容量、Profile、心跳、
+  当前任务、停止请求和离线状态；
+- Windows Runner 在空闲与执行期间注册并持续心跳，收到停止请求后不再领取新任务，
+  安全释放 Claim 后退出；
+- 新增 Agent Runtime API，将 WorkItem 与最新 Attempt 映射为 Agent 视角状态；
+- Codex Thread/Turn 在创建后立即写入 Attempt，人工门禁保存 Thread，并在人工回复后
+  通过 `thread/resume` 延续相同上下文；
+- 新增同机 Runner Supervisor 和启停 API，停止时先请求优雅退出，超时才终止进程；
+- 看板新增 Agent 状态中心、Worker 在线卡片、Runner 启停和执行上下文入口；
+- 自动化测试覆盖 Worker 生命周期、离线识别、运行态映射、Thread/Turn 写入以及
+  Needs Human 原 Thread 恢复；本地托管 Runner 启动、注册、心跳、停止冒烟验证通过。
+
+---
+
+## 12. 第十一步：扩展完整研发链路
 
 核心闭环稳定后，再增加上游和下游角色。
 
-### 11.1 上游 Agent
+### 12.1 上游 Agent
 
 - Requirement Agent；
 - Data Architect Agent；
 - Task Planner Agent。
 
-### 11.2 下游 Agent
+### 12.2 下游 Agent
 
 - Frontend Builder Agent；
 - Document Publisher；
@@ -981,7 +1034,7 @@ PRD
 
 ---
 
-## 12. 权限模型
+## 13. 权限模型
 
 | Agent | 建议权限 |
 |---|---|
@@ -999,7 +1052,7 @@ PRD
 
 ---
 
-## 13. 总任务清单
+## 14. 总任务清单
 
 | ID | 任务 | 优先级 | 依赖 |
 |---|---|---:|---|
@@ -1038,6 +1091,11 @@ PRD
 | INT-001 | 统一 Requirement Intake API | P0 | WFL-005 |
 | INT-002 | UI 创建 Feature 和拆分预览 | P1 | INT-001 |
 | INT-003 | 外部 Issue 幂等导入（后续期） | P2 | INT-001 |
+| RUN-001 | Worker 注册、心跳和离线识别 | P0 | INT-002 |
+| RUN-002 | Attempt Thread/Turn 实时上下文 | P0 | RUN-001 |
+| RUN-003 | Agent Runtime 查询与状态映射 | P0 | RUN-002 |
+| RUN-004 | Windows 本地 Runner Supervisor | P1 | RUN-001 |
+| RUN-005 | Agent 状态中心与 Runner 控制 UI | P1 | RUN-003、RUN-004 |
 | HARD-001 | 权限和秘密隔离 | P0 | SYM-004 |
 | HARD-002 | 重启恢复测试 | P0 | ACP-003 |
 | HARD-003 | 并发 Claim 测试 | P0 | ACP-003 |
@@ -1045,7 +1103,7 @@ PRD
 
 ---
 
-## 14. 启动顺序
+## 15. 启动顺序
 
 最初的两个开发阶段：
 
@@ -1055,8 +1113,9 @@ PRD
 这两步完成后再接入 Symphony，不反过来先修改 Symphony。
 
 截至 2026-08-04，协议、控制面、Windows Runner、Profile/Skill、端到端验证、最小
-UI 以及 `WFL-001` 至 `WFL-005` 已完成。本期只完成 `INT-001` 手工录入 API 和
-`INT-002` UI 创建与拆分预览；`INT-003` 外部 Issue 导入延期。
+UI 以及 `WFL-001` 至 `WFL-005` 已完成。本期先完成 `INT-001` 手工录入 API、
+`INT-002` UI 创建与拆分预览，再完成 `RUN-001` 至 `RUN-005` 的 Runner/Agent
+运行闭环；`INT-003` 外部 Issue 导入延期。
 
 第一阶段完成标志不是“看板能打开”，而是可以用固定 Schema 和 API 人工走通：
 

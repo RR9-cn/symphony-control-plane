@@ -189,8 +189,104 @@ class AgentAttemptView(ApiModel):
     profile_snapshot: dict[str, Any]
     status: str
     thread_id: str | None
+    turn_id: str | None
     started_at: datetime
     completed_at: datetime | None
+
+
+class AttemptContextUpdate(ApiModel):
+    claim_token: str = Field(
+        validation_alias=AliasChoices("claim_token", "claimToken"), min_length=16
+    )
+    thread_id: str = Field(
+        validation_alias=AliasChoices("thread_id", "threadId"), min_length=1
+    )
+    turn_id: str | None = Field(
+        default=None, validation_alias=AliasChoices("turn_id", "turnId")
+    )
+
+
+class WorkerRegistration(ApiModel):
+    worker_id: str = Field(
+        validation_alias=AliasChoices("worker_id", "workerId"), min_length=1
+    )
+    hostname: str = Field(min_length=1)
+    process_id: int = Field(
+        validation_alias=AliasChoices("process_id", "processId"), ge=1
+    )
+    version: str = Field(min_length=1, max_length=50)
+    capacity: int = Field(ge=1, le=128)
+    profiles: list[str] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_profiles(self) -> "WorkerRegistration":
+        if len(set(self.profiles)) != len(self.profiles):
+            raise ValueError("profiles must be unique")
+        return self
+
+
+class WorkerHeartbeat(ApiModel):
+    state: Literal["starting", "idle", "running", "stopping"]
+    active_work_items: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("active_work_items", "activeWorkItems"),
+    )
+    active_profiles: dict[str, str] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("active_profiles", "activeProfiles"),
+    )
+
+    @model_validator(mode="after")
+    def validate_active_work(self) -> "WorkerHeartbeat":
+        if len(set(self.active_work_items)) != len(self.active_work_items):
+            raise ValueError("active_work_items must be unique")
+        if set(self.active_profiles) - set(self.active_work_items):
+            raise ValueError("active_profiles keys must be active work items")
+        return self
+
+
+class WorkerView(ApiModel):
+    id: str
+    hostname: str
+    process_id: int
+    version: str
+    capacity: int
+    profiles: list[str]
+    active_work_items: list[str]
+    active_profiles: dict[str, str]
+    state: str
+    stop_requested: bool
+    started_at: datetime
+    last_seen_at: datetime
+    stopped_at: datetime | None
+
+
+class AgentRuntimeView(ApiModel):
+    work_item_id: str
+    feature_id: str
+    title: str
+    agent_role: str
+    stage: str
+    state: str
+    worker_id: str | None
+    attempt_id: str | None
+    attempt_number: int | None
+    profile_name: str | None
+    profile_version: int | None
+    thread_id: str | None
+    turn_id: str | None
+    started_at: datetime | None
+    updated_at: datetime
+
+
+class RunnerControlView(ApiModel):
+    state: Literal["stopped", "starting", "running", "stopping"]
+    process_id: int | None
+    worker_id: str
+    workflow: str
+    started_at: datetime | None
+    last_exit_code: int | None
+    recent_logs: list[str]
 
 
 class ClaimRequest(ApiModel):
@@ -312,6 +408,9 @@ class DecisionCommand(ApiModel):
     options: list[str] = Field(default_factory=list)
     response: str | None = None
     actor_id: str | None = None
+    thread_id: str | None = Field(
+        default=None, validation_alias=AliasChoices("thread_id", "threadId")
+    )
     claim_token: str | None = Field(
         default=None, validation_alias=AliasChoices("claim_token", "claimToken")
     )

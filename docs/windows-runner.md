@@ -208,6 +208,11 @@ $env:PYTHONPATH = "src"
 python -m symphony_windows .\WORKFLOW.md
 ```
 
+也可以在控制面 Agent 状态中心点击“启动 Runner”。该方式由控制面托管同机 Windows
+Runner 进程，使用 `ACP_MANAGED_RUNNER_WORKFLOW` 和
+`ACP_MANAGED_RUNNER_WORKER_ID` 配置 Workflow 与 Worker ID；UI 停止会先写入优雅
+停止请求，超时后才终止进程。外部宿主机仍使用上述命令独立启动。
+
 只执行一次轮询并等待该批任务结束：
 
 ```powershell

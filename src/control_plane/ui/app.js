@@ -19,6 +19,20 @@ const ROLE_META = {
   test_executor: { label: "Test Executor", color: "#66d996" },
 };
 
+const RUNTIME_META = {
+  waiting_dependency: { label: "等待依赖", tone: "muted" },
+  ready: { label: "准备执行", tone: "ready" },
+  starting: { label: "正在启动", tone: "running" },
+  running: { label: "执行中", tone: "running" },
+  waiting_human: { label: "等待人工", tone: "human" },
+  reviewing: { label: "等待复核", tone: "review" },
+  rework: { label: "返工", tone: "risk" },
+  retrying: { label: "等待重试", tone: "retry" },
+  blocked: { label: "异常阻塞", tone: "risk" },
+  completed: { label: "已完成", tone: "success" },
+  cancelled: { label: "已取消", tone: "muted" },
+};
+
 const BOARD_COLUMNS = [
   { key: "draft", label: "Draft", statuses: ["draft"] },
   { key: "ready", label: "Ready", statuses: ["ready"] },
@@ -62,6 +76,9 @@ const state = {
   features: [],
   workItems: [],
   profiles: [],
+  workers: [],
+  agentRuntimes: [],
+  runnerControl: null,
   selectedFeatureId: sessionStorage.getItem("acp_feature_id") || "",
   selectedItemId: null,
   detail: null,
@@ -95,6 +112,11 @@ const dom = {
   metricHuman: document.querySelector("#metric-human"),
   metricRisk: document.querySelector("#metric-risk"),
   metricRetry: document.querySelector("#metric-retry"),
+  runnerState: document.querySelector("#runner-state"),
+  runnerStartButton: document.querySelector("#runner-start-button"),
+  runnerStopButton: document.querySelector("#runner-stop-button"),
+  workerList: document.querySelector("#worker-list"),
+  agentRuntimeList: document.querySelector("#agent-runtime-list"),
   drawer: document.querySelector("#detail-drawer"),
   drawerBackdrop: document.querySelector("#drawer-backdrop"),
   drawerClose: document.querySelector("#drawer-close"),
@@ -292,6 +314,56 @@ function renderMetrics(items) {
   dom.metricRetry.textContent = `${count(["retry_queued"])} 个重试`;
 }
 
+function runtimeItems() {
+  return state.selectedFeatureId
+    ? state.agentRuntimes.filter((runtime) => runtime.feature_id === state.selectedFeatureId)
+    : state.agentRuntimes;
+}
+
+function renderAgentRuntime() {
+  const control = state.runnerControl;
+  const controlState = control?.state || "stopped";
+  const running = ["starting", "running", "stopping"].includes(controlState);
+  const stateLabel = {
+    starting: "Runner 启动中",
+    running: "Runner 常驻运行",
+    stopping: "Runner 停止中",
+    stopped: "Runner 未启动",
+  }[controlState] || controlState;
+  dom.runnerState.className = `runner-state ${escapeHtml(controlState)}`;
+  dom.runnerState.innerHTML = `<span class="status-dot"></span><strong>${escapeHtml(stateLabel)}</strong>`;
+  dom.runnerStartButton.disabled = running;
+  dom.runnerStopButton.disabled = !running;
+
+  const workers = state.workers;
+  dom.workerList.innerHTML = workers.length
+    ? workers.map((worker) => {
+        const active = worker.active_work_items.length;
+        return `<article class="worker-card ${escapeHtml(worker.state)}">
+          <span class="worker-status-dot"></span>
+          <div><strong>${escapeHtml(worker.id)}</strong><small>${escapeHtml(worker.hostname)} · PID ${worker.process_id}</small></div>
+          <span>${escapeHtml(worker.state)} · ${active}/${worker.capacity} 执行中</span>
+        </article>`;
+      }).join("")
+    : '<div class="agent-empty">暂无在线 Worker。启动 Runner 后会自动注册。</div>';
+
+  const runtimes = runtimeItems();
+  dom.agentRuntimeList.innerHTML = runtimes.length
+    ? runtimes.map((runtime) => {
+        const role = ROLE_META[runtime.agent_role] || { label: runtime.agent_role, color: "#929cab" };
+        const meta = RUNTIME_META[runtime.state] || { label: runtime.state, tone: "muted" };
+        const context = runtime.thread_id
+          ? `Thread ${runtime.thread_id.slice(0, 8)}`
+          : runtime.worker_id || "尚未分配 Worker";
+        return `<button class="agent-runtime-card" data-item-id="${escapeHtml(runtime.work_item_id)}" type="button">
+          <span class="agent-runtime-head"><span class="role-orb" style="--role-color:${role.color}"></span><strong>${escapeHtml(role.label)}</strong><small class="runtime-state ${escapeHtml(meta.tone)}">${escapeHtml(meta.label)}</small></span>
+          <span class="agent-runtime-title">${escapeHtml(runtime.title)}</span>
+          <span class="agent-runtime-context"><span>${escapeHtml(runtime.work_item_id)}</span><span>${escapeHtml(context)}</span></span>
+        </button>`;
+      }).join("")
+    : '<div class="agent-empty">当前范围没有 Agent WorkItem。</div>';
+}
+
 function workCard(item) {
   const role = ROLE_META[item.agent_role] || { label: item.agent_role, color: "#929cab" };
   const worker = item.claim.worker_id || (item.blocked_by.length ? `等待 ${item.blocked_by.length} 项依赖` : relativeTime(item.updated_at));
@@ -344,6 +416,7 @@ function renderAll() {
   renderFeatures();
   renderHeader();
   renderBoard();
+  renderAgentRuntime();
 }
 
 async function refresh({ quiet = false } = {}) {
@@ -362,14 +435,20 @@ async function refresh({ quiet = false } = {}) {
       }
       return;
     }
-    const [features, workItems, profiles] = await Promise.all([
+    const [features, workItems, profiles, workers, agentRuntimes, runnerControl] = await Promise.all([
       api("/api/features"),
       api("/api/work-items"),
       api("/api/agent-profiles"),
+      api("/api/workers"),
+      api("/api/agent-runtimes"),
+      api("/api/runner-control"),
     ]);
     state.features = features;
     state.workItems = workItems;
     state.profiles = profiles;
+    state.workers = workers;
+    state.agentRuntimes = agentRuntimes;
+    state.runnerControl = runnerControl;
     if (state.selectedFeatureId && !features.some((feature) => feature.id === state.selectedFeatureId)) {
       state.selectedFeatureId = "";
       sessionStorage.removeItem("acp_feature_id");
@@ -857,6 +936,28 @@ async function executeAction(formData) {
 
 dom.tokenButton.addEventListener("click", openTokenModal);
 dom.newIssueButton.addEventListener("click", openIssueModal);
+dom.runnerStartButton.addEventListener("click", async () => {
+  dom.runnerStartButton.disabled = true;
+  try {
+    await api("/api/runner-control/start", { method: "POST", body: "{}" });
+    toast("Runner 已启动，Ready 工作项将自动领取");
+    await refresh();
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    dom.runnerStartButton.disabled = false;
+  }
+});
+dom.runnerStopButton.addEventListener("click", async () => {
+  dom.runnerStopButton.disabled = true;
+  try {
+    await api("/api/runner-control/stop", { method: "POST", body: "{}" });
+    toast("Runner 已停止；执行中的任务已安全释放");
+    await refresh();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+});
 dom.refreshButton.addEventListener("click", () => refresh());
 dom.featureSearch.addEventListener("input", renderFeatures);
 dom.workItemSearch.addEventListener("input", renderBoard);
@@ -872,6 +973,11 @@ dom.featureList.addEventListener("click", (event) => {
 });
 
 dom.board.addEventListener("click", (event) => {
+  const card = event.target.closest("[data-item-id]");
+  if (card) selectWorkItem(card.dataset.itemId);
+});
+
+dom.agentRuntimeList.addEventListener("click", (event) => {
   const card = event.target.closest("[data-item-id]");
   if (card) selectWorkItem(card.dataset.itemId);
 });

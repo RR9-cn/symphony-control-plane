@@ -23,6 +23,7 @@ from control_plane.models import (
     AgentProfile,
     Feature,
     HumanDecision,
+    Worker,
     WorkItem,
     WorkItemArtifact,
     WorkItemDependency,
@@ -32,7 +33,9 @@ from control_plane.models import (
 from control_plane.protocol import PROTOCOL
 from control_plane.schemas import (
     AgentAttemptView,
+    AgentRuntimeView,
     AgentProfileView,
+    AttemptContextUpdate,
     ArtifactCreate,
     ArtifactData,
     ArtifactView,
@@ -56,6 +59,9 @@ from control_plane.schemas import (
     WorkItemCreate,
     WorkItemPatch,
     WorkItemView,
+    WorkerHeartbeat,
+    WorkerRegistration,
+    WorkerView,
 )
 
 
@@ -106,6 +112,20 @@ _MANUAL_ISSUE_STAGES = (
         "全部测试场景具有结果和证据，业务缺陷已按流程退回。",
     ),
 )
+
+
+_RUNTIME_STATE = {
+    "draft": "waiting_dependency",
+    "ready": "ready",
+    "running": "running",
+    "needs_human": "waiting_human",
+    "stage_review": "reviewing",
+    "rework": "rework",
+    "retry_queued": "retrying",
+    "blocked": "blocked",
+    "done": "completed",
+    "cancelled": "cancelled",
+}
 
 
 class ControlPlaneService:
@@ -450,7 +470,8 @@ class ControlPlaneService:
             continuation_turn_count = 0
             if (
                 previous_attempt is not None
-                and previous_attempt.status in {"retry_queued", "stage_review"}
+                and previous_attempt.status
+                in {"retry_queued", "stage_review", "needs_human"}
                 and previous_attempt.thread_id
                 and command.profile is not None
                 and previous_attempt.profile_snapshot.get("profile_name")
@@ -511,6 +532,189 @@ class ControlPlaneService:
             )
         ).all()
         return [AgentProfileView.model_validate(profile) for profile in profiles]
+
+    async def register_worker(self, command: WorkerRegistration) -> WorkerView:
+        now = utc_now()
+        async with self.session.begin():
+            worker = await self.session.get(Worker, command.worker_id)
+            if worker is None:
+                worker = Worker(
+                    id=command.worker_id,
+                    hostname=command.hostname,
+                    process_id=command.process_id,
+                    version=command.version,
+                    capacity=command.capacity,
+                    profiles=command.profiles,
+                    active_work_items=[],
+                    active_profiles={},
+                    state="starting",
+                    started_at=now,
+                    last_seen_at=now,
+                )
+                self.session.add(worker)
+            else:
+                worker.hostname = command.hostname
+                worker.process_id = command.process_id
+                worker.version = command.version
+                worker.capacity = command.capacity
+                worker.profiles = command.profiles
+                worker.active_work_items = []
+                worker.active_profiles = {}
+                worker.state = "starting"
+                worker.stop_requested = False
+                worker.started_at = now
+                worker.last_seen_at = now
+                worker.stopped_at = None
+        return self._worker_view(worker, now)
+
+    async def heartbeat_worker(
+        self, worker_id: str, command: WorkerHeartbeat
+    ) -> WorkerView:
+        now = utc_now()
+        async with self.session.begin():
+            worker = await self.session.get(Worker, worker_id)
+            if worker is None:
+                raise NotFoundError(f"worker not found: {worker_id}")
+            worker.state = command.state
+            worker.active_work_items = command.active_work_items
+            worker.active_profiles = command.active_profiles
+            worker.last_seen_at = now
+        return self._worker_view(worker, now)
+
+    async def stop_worker(self, worker_id: str) -> WorkerView:
+        now = utc_now()
+        async with self.session.begin():
+            worker = await self.session.get(Worker, worker_id)
+            if worker is None:
+                raise NotFoundError(f"worker not found: {worker_id}")
+            worker.state = "stopped"
+            worker.active_work_items = []
+            worker.active_profiles = {}
+            worker.last_seen_at = now
+            worker.stopped_at = now
+            worker.stop_requested = False
+        return self._worker_view(worker, now)
+
+    async def request_worker_stop(self, worker_id: str) -> WorkerView:
+        now = utc_now()
+        async with self.session.begin():
+            worker = await self.session.get(Worker, worker_id)
+            if worker is None:
+                raise NotFoundError(f"worker not found: {worker_id}")
+            if self._worker_state(worker, now) in {"offline", "stopped"}:
+                raise ConflictError(f"worker is not running: {worker_id}")
+            worker.stop_requested = True
+        return self._worker_view(worker, now)
+
+    async def list_workers(self) -> list[WorkerView]:
+        now = utc_now()
+        workers = (
+            await self.session.scalars(
+                select(Worker).order_by(Worker.last_seen_at.desc(), Worker.id)
+            )
+        ).all()
+        return [self._worker_view(worker, now) for worker in workers]
+
+    async def list_agent_runtimes(
+        self, feature_id: str | None = None
+    ) -> list[AgentRuntimeView]:
+        query = select(WorkItem).order_by(WorkItem.created_at, WorkItem.id)
+        if feature_id is not None:
+            query = query.where(WorkItem.feature_id == feature_id)
+        items = (await self.session.scalars(query)).all()
+        if not items:
+            return []
+        attempts = (
+            await self.session.scalars(
+                select(AgentAttempt)
+                .where(AgentAttempt.work_item_id.in_([item.id for item in items]))
+                .order_by(
+                    AgentAttempt.work_item_id,
+                    AgentAttempt.attempt_number.desc(),
+                )
+            )
+        ).all()
+        latest: dict[str, AgentAttempt] = {}
+        for attempt in attempts:
+            latest.setdefault(attempt.work_item_id, attempt)
+        result: list[AgentRuntimeView] = []
+        for item in items:
+            latest_attempt = latest.get(item.id)
+            state = _RUNTIME_STATE.get(item.status, item.status)
+            if (
+                item.status == "running"
+                and latest_attempt is not None
+                and not latest_attempt.thread_id
+            ):
+                state = "starting"
+            snapshot = (
+                latest_attempt.profile_snapshot if latest_attempt is not None else {}
+            )
+            result.append(
+                AgentRuntimeView(
+                    work_item_id=item.id,
+                    feature_id=item.feature_id,
+                    title=item.title,
+                    agent_role=item.agent_role,
+                    stage=item.stage,
+                    state=state,
+                    worker_id=item.claim_worker_id
+                    or (
+                        latest_attempt.worker_id
+                        if latest_attempt is not None
+                        else None
+                    ),
+                    attempt_id=latest_attempt.id if latest_attempt is not None else None,
+                    attempt_number=(
+                        latest_attempt.attempt_number
+                        if latest_attempt is not None
+                        else None
+                    ),
+                    profile_name=snapshot.get("profile_name"),
+                    profile_version=snapshot.get("profile_version"),
+                    thread_id=(
+                        latest_attempt.thread_id
+                        if latest_attempt is not None
+                        else None
+                    ),
+                    turn_id=(
+                        latest_attempt.turn_id
+                        if latest_attempt is not None
+                        else None
+                    ),
+                    started_at=(
+                        latest_attempt.started_at
+                        if latest_attempt is not None
+                        else None
+                    ),
+                    updated_at=item.updated_at,
+                )
+            )
+        return result
+
+    async def update_attempt_context(
+        self, item_id: str, command: AttemptContextUpdate
+    ) -> AgentAttemptView:
+        async with self.session.begin():
+            item = await self.session.get(WorkItem, item_id)
+            if item is None:
+                raise NotFoundError(f"work item not found: {item_id}")
+            self._verify_claim(item, command.claim_token)
+            attempt = await self.session.scalar(
+                select(AgentAttempt)
+                .where(
+                    AgentAttempt.work_item_id == item_id,
+                    AgentAttempt.completed_at.is_(None),
+                )
+                .order_by(AgentAttempt.attempt_number.desc())
+                .limit(1)
+            )
+            if attempt is None:
+                raise ConflictError("running work item has no active attempt")
+            attempt.thread_id = command.thread_id
+            if command.turn_id is not None:
+                attempt.turn_id = command.turn_id
+        return AgentAttemptView.model_validate(attempt)
 
     async def list_attempts(self, item_id: str) -> list[AgentAttemptView]:
         if await self.session.get(WorkItem, item_id) is None:
@@ -853,7 +1057,9 @@ class ControlPlaneService:
                 {"decision_id": decision.id},
             )
             if from_status == "running":
-                await self._finish_latest_attempt(item_id, "needs_human")
+                await self._finish_latest_attempt(
+                    item_id, "needs_human", command.thread_id
+                )
         return DecisionView.model_validate(decision)
 
     async def _resolve_decision(
@@ -1157,6 +1363,19 @@ class ControlPlaneService:
             if isinstance(thread_id, str) and thread_id:
                 attempt.thread_id = thread_id
             attempt.completed_at = utc_now()
+
+    def _worker_state(self, worker: Worker, now: datetime) -> str:
+        if worker.state == "stopped":
+            return "stopped"
+        age = (now - _as_utc(worker.last_seen_at)).total_seconds()
+        if age > self.settings.worker_offline_after_seconds:
+            return "offline"
+        return worker.state
+
+    def _worker_view(self, worker: Worker, now: datetime) -> WorkerView:
+        return WorkerView.model_validate(worker).model_copy(
+            update={"state": self._worker_state(worker, now)}
+        )
 
     async def _view(self, item: WorkItem) -> WorkItemView:
         dependencies = list(

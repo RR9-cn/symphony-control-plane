@@ -14,9 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from control_plane.config import Settings
 from control_plane.database import Database
 from control_plane.errors import ControlPlaneError, RepositoryResolutionError
+from control_plane.runner_supervisor import RunnerSupervisor
 from control_plane.schemas import (
     AgentAttemptView,
+    AgentRuntimeView,
     AgentProfileView,
+    AttemptContextUpdate,
     ArtifactCreate,
     ArtifactView,
     ClaimRequest,
@@ -34,11 +37,15 @@ from control_plane.schemas import (
     MaintenanceResult,
     RepositoryHeadRequest,
     RepositoryHeadView,
+    RunnerControlView,
     ReleaseRequest,
     StatusTransitionRequest,
     WorkItemCreate,
     WorkItemPatch,
     WorkItemView,
+    WorkerHeartbeat,
+    WorkerRegistration,
+    WorkerView,
 )
 from control_plane.service import ControlPlaneService
 
@@ -103,15 +110,20 @@ async def _lease_sweeper(app: FastAPI) -> None:
 def create_app(settings: Settings | None = None, database: Database | None = None) -> FastAPI:
     resolved_settings = settings or Settings()
     resolved_database = database or Database(resolved_settings)
+    runner_supervisor = RunnerSupervisor(resolved_settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         task: asyncio.Task[None] | None = None
         if resolved_settings.enable_lease_sweeper:
             task = asyncio.create_task(_lease_sweeper(app))
+        if resolved_settings.managed_runner_autostart:
+            with contextlib.suppress(ControlPlaneError):
+                await runner_supervisor.start()
         try:
             yield
         finally:
+            await runner_supervisor.stop()
             if task:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -126,6 +138,7 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
     app.state.settings = resolved_settings
     app.state.database = resolved_database
     app.state.lease_sweeper_failures = 0
+    app.state.runner_supervisor = runner_supervisor
 
     @app.middleware("http")
     async def authenticate_api(request: Request, call_next):  # type: ignore[no-untyped-def]
@@ -181,6 +194,7 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
             "database": "sqlite",
             "auth_enabled": resolved_settings.api_token is not None,
             "lease_sweeper_failures": app.state.lease_sweeper_failures,
+            "managed_runner": runner_supervisor.view().state,
         }
 
     @app.post(
@@ -244,11 +258,66 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
     async def list_agent_profiles(session: Session) -> list[AgentProfileView]:
         return await service(session).list_agent_profiles()
 
+    @app.post("/api/workers/register", response_model=WorkerView)
+    async def register_worker(
+        command: WorkerRegistration, session: Session
+    ) -> WorkerView:
+        return await service(session).register_worker(command)
+
+    @app.get("/api/workers", response_model=list[WorkerView])
+    async def list_workers(session: Session) -> list[WorkerView]:
+        return await service(session).list_workers()
+
+    @app.get("/api/runner-control", response_model=RunnerControlView)
+    async def runner_control_status() -> RunnerControlView:
+        return runner_supervisor.view()
+
+    @app.post("/api/runner-control/start", response_model=RunnerControlView)
+    async def start_managed_runner() -> RunnerControlView:
+        return await runner_supervisor.start()
+
+    @app.post("/api/runner-control/stop", response_model=RunnerControlView)
+    async def stop_managed_runner(session: Session) -> RunnerControlView:
+        with contextlib.suppress(ControlPlaneError):
+            await service(session).request_worker_stop(
+                resolved_settings.managed_runner_worker_id
+            )
+        return await runner_supervisor.stop()
+
+    @app.post("/api/workers/{worker_id}/heartbeat", response_model=WorkerView)
+    async def heartbeat_worker(
+        worker_id: str, command: WorkerHeartbeat, session: Session
+    ) -> WorkerView:
+        return await service(session).heartbeat_worker(worker_id, command)
+
+    @app.post("/api/workers/{worker_id}/stopped", response_model=WorkerView)
+    async def stop_worker(worker_id: str, session: Session) -> WorkerView:
+        return await service(session).stop_worker(worker_id)
+
+    @app.post("/api/workers/{worker_id}/request-stop", response_model=WorkerView)
+    async def request_worker_stop(worker_id: str, session: Session) -> WorkerView:
+        return await service(session).request_worker_stop(worker_id)
+
+    @app.get("/api/agent-runtimes", response_model=list[AgentRuntimeView])
+    async def list_agent_runtimes(
+        session: Session, feature_id: str | None = None
+    ) -> list[AgentRuntimeView]:
+        return await service(session).list_agent_runtimes(feature_id)
+
     @app.get(
         "/api/work-items/{item_id}/attempts", response_model=list[AgentAttemptView]
     )
     async def list_attempts(item_id: str, session: Session) -> list[AgentAttemptView]:
         return await service(session).list_attempts(item_id)
+
+    @app.post(
+        "/api/work-items/{item_id}/attempt-context",
+        response_model=AgentAttemptView,
+    )
+    async def update_attempt_context(
+        item_id: str, command: AttemptContextUpdate, session: Session
+    ) -> AgentAttemptView:
+        return await service(session).update_attempt_context(item_id, command)
 
     @app.get("/api/work-items/{item_id}", response_model=WorkItemView)
     async def get_work_item(item_id: str, session: Session) -> WorkItemView:

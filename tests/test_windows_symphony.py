@@ -424,6 +424,27 @@ async def test_skill_human_confirmation_exits_and_resumes_ready(
         await authenticated_api.get("/api/work-items/WI-001/attempts", headers=headers)
     ).json()
     assert attempts[0]["status"] == "needs_human"
+    assert attempts[0]["thread_id"] == "thread-test"
+    assert attempts[0]["turn_id"] == "turn-test"
+
+    monkeypatch.setenv("FAKE_CODEX_MODE", "resume")
+    resumed_tracker = ControlPlaneTracker(
+        workflow.tracker,
+        transport=httpx.ASGITransport(app=authenticated_api.app),
+    )
+    try:
+        async with WindowsSymphony(workflow, tracker=resumed_tracker) as orchestrator:
+            resumed_outcomes = await orchestrator.run_once()
+    finally:
+        await resumed_tracker.close()
+    assert resumed_outcomes[0].thread_id == "thread-test"
+    attempts = (
+        await authenticated_api.get("/api/work-items/WI-001/attempts", headers=headers)
+    ).json()
+    assert [attempt["thread_id"] for attempt in attempts] == [
+        "thread-test",
+        "thread-test",
+    ]
 
 
 async def test_missing_profile_is_blocked_without_builder_fallback(
@@ -498,6 +519,19 @@ async def test_profile_concurrency_is_enforced_before_claim(
                 candidate("WI-002", "backend_builder"),
                 candidate("WI-004", "solution_architect"),
             ]
+
+        async def register_worker(
+            self, *, capacity: int, profiles: list[str]
+        ) -> dict[str, Any]:
+            return {"capacity": capacity, "profiles": profiles}
+
+        async def heartbeat_worker(
+            self, *, active_profiles: dict[str, str]
+        ) -> dict[str, Any]:
+            return {"active_profiles": active_profiles, "stop_requested": False}
+
+        async def worker_stopped(self) -> dict[str, Any]:
+            return {"state": "stopped"}
 
         async def maintenance_tick(self) -> dict[str, int]:
             return {"expired": 0, "released": 0}

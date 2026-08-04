@@ -70,7 +70,11 @@ class CodexAppServer:
                 tracker,
                 resume_thread_id=resume_thread_id,
             )
+            await tracker.update_attempt_context(lease, thread_id=thread_id)
             turn_id = await self._start_turn(workspace, prompt, issue, thread_id)
+            await tracker.update_attempt_context(
+                lease, thread_id=thread_id, turn_id=turn_id
+            )
             try:
                 status = await asyncio.wait_for(
                     self._receive_turn(tracker, lease, thread_id),

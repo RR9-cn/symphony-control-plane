@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import socket
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
@@ -199,6 +201,76 @@ class ControlPlaneTracker:
             raise TrackerError("maintenance response must be an object")
         return payload
 
+    async def register_worker(
+        self, *, capacity: int, profiles: list[str]
+    ) -> dict[str, Any]:
+        payload = await self._request(
+            "POST",
+            "/api/workers/register",
+            json={
+                "workerId": self.config.worker_id,
+                "hostname": socket.gethostname(),
+                "processId": os.getpid(),
+                "version": "0.1.0",
+                "capacity": capacity,
+                "profiles": profiles,
+            },
+        )
+        if not isinstance(payload, dict):
+            raise TrackerError("worker registration response must be an object")
+        return payload
+
+    async def heartbeat_worker(
+        self, *, active_profiles: dict[str, str]
+    ) -> dict[str, Any]:
+        active_items = sorted(active_profiles)
+        payload = await self._request(
+            "POST",
+            f"/api/workers/{quote(self.config.worker_id, safe='')}/heartbeat",
+            json={
+                "state": "running" if active_items else "idle",
+                "activeWorkItems": active_items,
+                "activeProfiles": active_profiles,
+            },
+        )
+        if not isinstance(payload, dict):
+            raise TrackerError("worker heartbeat response must be an object")
+        return payload
+
+    async def worker_stopped(self) -> dict[str, Any]:
+        payload = await self._request(
+            "POST",
+            f"/api/workers/{quote(self.config.worker_id, safe='')}/stopped",
+            json={},
+        )
+        if not isinstance(payload, dict):
+            raise TrackerError("worker stopped response must be an object")
+        return payload
+
+    async def update_attempt_context(
+        self,
+        lease: ClaimLease,
+        *,
+        thread_id: str,
+        turn_id: str | None = None,
+    ) -> dict[str, Any]:
+        self._require_active(lease)
+        body: dict[str, Any] = {
+            "claimToken": lease.token,
+            "threadId": thread_id,
+        }
+        if turn_id is not None:
+            body["turnId"] = turn_id
+        payload = await self._request(
+            "POST",
+            self._item_path(lease.id) + "/attempt-context",
+            json=body,
+        )
+        if not isinstance(payload, dict):
+            raise TrackerError("attempt context response must be an object")
+        lease.attempt = payload
+        return payload
+
     def tool_specs(self) -> list[dict[str, Any]]:
         empty = {"type": "object", "additionalProperties": False, "properties": {}}
         return [
@@ -376,6 +448,7 @@ class ControlPlaneTracker:
                     "options": options,
                     "actor_id": "codex",
                     "claimToken": lease.token,
+                    "threadId": thread_id,
                 },
             )
             lease.active = False
