@@ -1,0 +1,4 @@
+﻿interface:
+  display_name: "FSkill Verify"
+  short_description: "按测试方案固定 Windows/WSL 执行面，启动 harness、执行回归、工程校验并清理环境。"
+  default_prompt: "根据测试方案执行 harness 验证；在 Windows + WSL 环境中固定应用、测试和构建的执行面"

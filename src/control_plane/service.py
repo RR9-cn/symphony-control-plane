@@ -12,6 +12,7 @@ from sqlalchemy.orm import aliased
 
 from control_plane.config import Settings
 from control_plane.errors import (
+    AgentProfileConflictError,
     ClaimError,
     ConflictError,
     InvalidTransitionError,
@@ -19,6 +20,7 @@ from control_plane.errors import (
 )
 from control_plane.models import (
     AgentAttempt,
+    AgentProfile,
     Feature,
     HumanDecision,
     WorkItem,
@@ -29,6 +31,8 @@ from control_plane.models import (
 )
 from control_plane.protocol import PROTOCOL
 from control_plane.schemas import (
+    AgentAttemptView,
+    AgentProfileView,
     ArtifactCreate,
     ArtifactData,
     ArtifactView,
@@ -215,6 +219,31 @@ class ControlPlaneService:
         expires_at = utc_now() + timedelta(seconds=command.lease_seconds)
         incomplete = self._incomplete_dependency_exists()
         async with self.session.begin():
+            profile: AgentProfile | None = None
+            if command.profile is not None:
+                profile = await self.session.scalar(
+                    select(AgentProfile).where(
+                        AgentProfile.name == command.profile.name,
+                        AgentProfile.version == command.profile.version,
+                    )
+                )
+                if profile is None:
+                    profile = AgentProfile(
+                        name=command.profile.name,
+                        version=command.profile.version,
+                        config=command.profile.config,
+                    )
+                    self.session.add(profile)
+                    await self.session.flush()
+                elif not profile.active:
+                    raise AgentProfileConflictError(
+                        f"agent profile is inactive: {profile.name} v{profile.version}"
+                    )
+                elif profile.config != command.profile.config:
+                    raise AgentProfileConflictError(
+                        f"agent profile version already has different config: "
+                        f"{profile.name} v{profile.version}"
+                    )
             result = await self.session.execute(
                 update(WorkItem)
                 .where(
@@ -235,20 +264,21 @@ class ControlPlaneService:
             )
             if result.rowcount != 1:
                 await self._raise_claim_conflict(item_id, command.expected_version)
-            attempt_number = (
-                await self.session.scalar(
-                    select(func.coalesce(func.max(AgentAttempt.attempt_number), 0)).where(
-                        AgentAttempt.work_item_id == item_id
-                    )
-                )
-            ) + 1
-            self.session.add(
-                AgentAttempt(
-                    work_item_id=item_id,
-                    attempt_number=attempt_number,
-                    worker_id=command.worker_id,
+            latest_attempt_number = await self.session.scalar(
+                select(func.coalesce(func.max(AgentAttempt.attempt_number), 0)).where(
+                    AgentAttempt.work_item_id == item_id
                 )
             )
+            attempt_number = (latest_attempt_number or 0) + 1
+            attempt = AgentAttempt(
+                work_item_id=item_id,
+                attempt_number=attempt_number,
+                worker_id=command.worker_id,
+                profile_id=profile.id if profile is not None else None,
+                profile_snapshot=command.profile.config if command.profile else {},
+            )
+            self.session.add(attempt)
+            await self.session.flush()
             self._add_event(
                 item_id,
                 "claimed",
@@ -256,9 +286,40 @@ class ControlPlaneService:
                 command.worker_id,
                 "ready",
                 "running",
-                {"lease_seconds": command.lease_seconds, "attempt": attempt_number},
+                {
+                    "lease_seconds": command.lease_seconds,
+                    "attempt": attempt_number,
+                    "profile_name": command.profile.name if command.profile else None,
+                    "profile_version": command.profile.version if command.profile else None,
+                },
             )
-        return ClaimResult(work_item=await self.get_work_item(item_id), claim_token=token)
+        return ClaimResult(
+            work_item=await self.get_work_item(item_id),
+            claim_token=token,
+            attempt=AgentAttemptView.model_validate(attempt),
+        )
+
+    async def list_agent_profiles(self) -> list[AgentProfileView]:
+        profiles = (
+            await self.session.scalars(
+                select(AgentProfile).order_by(
+                    AgentProfile.name, AgentProfile.version.desc()
+                )
+            )
+        ).all()
+        return [AgentProfileView.model_validate(profile) for profile in profiles]
+
+    async def list_attempts(self, item_id: str) -> list[AgentAttemptView]:
+        if await self.session.get(WorkItem, item_id) is None:
+            raise NotFoundError(f"work item not found: {item_id}")
+        attempts = (
+            await self.session.scalars(
+                select(AgentAttempt)
+                .where(AgentAttempt.work_item_id == item_id)
+                .order_by(AgentAttempt.attempt_number)
+            )
+        ).all()
+        return [AgentAttemptView.model_validate(attempt) for attempt in attempts]
 
     async def heartbeat(self, item_id: str, command: HeartbeatRequest) -> WorkItemView:
         now = utc_now()
@@ -311,12 +372,13 @@ class ControlPlaneService:
             item = await self.session.get(WorkItem, item_id)
             if item is None:
                 raise NotFoundError(f"work item not found: {item_id}")
+            from_status = item.status
             try:
-                definition = PROTOCOL.transition(item.status, command.to_status, command.event)
+                definition = PROTOCOL.transition(from_status, command.to_status, command.event)
             except ValueError as error:
                 raise InvalidTransitionError(str(error)) from error
             self._verify_transition_actor(definition.actor, command.actor_type)
-            if item.status == "running" and command.event != "work_item_cancelled":
+            if from_status == "running" and command.event != "work_item_cancelled":
                 self._verify_claim(item, command.claim_token)
             await self._validate_transition_guards(item, command)
 
@@ -348,7 +410,7 @@ class ControlPlaneService:
                 update(WorkItem)
                 .where(
                     WorkItem.id == item_id,
-                    WorkItem.status == item.status,
+                    WorkItem.status == from_status,
                     WorkItem.version == item.version,
                 )
                 .values(**values)
@@ -360,13 +422,13 @@ class ControlPlaneService:
                 command.event,
                 command.actor_type,
                 command.actor_id,
-                item.status,
+                from_status,
                 command.to_status,
                 command.payload,
             )
             if command.to_status == "done":
                 await self._record_dependency_satisfied(item_id)
-            if item.status == "running" and command.to_status != "running":
+            if from_status == "running" and command.to_status != "running":
                 await self._finish_latest_attempt(item_id, command.to_status)
         return await self.get_work_item(item_id)
 
@@ -428,6 +490,18 @@ class ControlPlaneService:
         if command.action == "request":
             return await self._request_decision(item_id, command)
         return await self._resolve_decision(item_id, command)
+
+    async def list_decisions(self, item_id: str) -> list[DecisionView]:
+        if await self.session.get(WorkItem, item_id) is None:
+            raise NotFoundError(f"work item not found: {item_id}")
+        decisions = (
+            await self.session.scalars(
+                select(HumanDecision)
+                .where(HumanDecision.work_item_id == item_id)
+                .order_by(HumanDecision.created_at, HumanDecision.id)
+            )
+        ).all()
+        return [DecisionView.model_validate(decision) for decision in decisions]
 
     async def maintenance_tick(self) -> MaintenanceResult:
         expired = 0
@@ -518,17 +592,18 @@ class ControlPlaneService:
             item = await self.session.get(WorkItem, item_id)
             if item is None:
                 raise NotFoundError(f"work item not found: {item_id}")
-            if item.status == "running":
+            from_status = item.status
+            if from_status == "running":
                 event = "human_input_requested"
                 self._verify_claim(item, command.claim_token)
-            elif item.status == "stage_review":
+            elif from_status == "stage_review":
                 event = "human_review_requested"
             else:
                 raise InvalidTransitionError(
                     f"cannot request human input while status={item.status}"
                 )
             try:
-                PROTOCOL.transition(item.status, "needs_human", event)
+                PROTOCOL.transition(from_status, "needs_human", event)
             except ValueError as error:
                 raise InvalidTransitionError(str(error)) from error
             decision = HumanDecision(
@@ -543,7 +618,7 @@ class ControlPlaneService:
                 update(WorkItem)
                 .where(
                     WorkItem.id == item_id,
-                    WorkItem.status == item.status,
+                    WorkItem.status == from_status,
                     WorkItem.version == item.version,
                 )
                 .values(
@@ -560,13 +635,13 @@ class ControlPlaneService:
             self._add_event(
                 item_id,
                 event,
-                "worker" if item.status == "running" else "policy",
+                "worker" if from_status == "running" else "policy",
                 command.actor_id,
-                item.status,
+                from_status,
                 "needs_human",
                 {"decision_id": decision.id},
             )
-            if item.status == "running":
+            if from_status == "running":
                 await self._finish_latest_attempt(item_id, "needs_human")
         return DecisionView.model_validate(decision)
 

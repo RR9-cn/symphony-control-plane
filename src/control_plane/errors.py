@@ -19,3 +19,7 @@ class InvalidTransitionError(ConflictError):
 
 class ClaimError(ConflictError):
     code = "invalid_claim"
+
+
+class AgentProfileConflictError(ConflictError):
+    code = "agent_profile_conflict"

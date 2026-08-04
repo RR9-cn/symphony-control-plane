@@ -13,9 +13,16 @@ from symphony_windows.workflow import TrackerConfig
 
 
 class TrackerError(RuntimeError):
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        error_code: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.error_code = error_code
 
 
 class ClaimConflict(TrackerError):
@@ -26,6 +33,7 @@ class ClaimConflict(TrackerError):
 class ClaimLease:
     item: dict[str, Any]
     token: str
+    attempt: dict[str, Any] | None = None
     active: bool = True
 
     @property
@@ -75,32 +83,47 @@ class ControlPlaneTracker:
             raise TrackerError("work item response must be an object")
         return payload
 
-    async def claim(self, item: dict[str, Any]) -> ClaimLease:
+    async def claim(
+        self,
+        item: dict[str, Any],
+        profile: dict[str, Any] | None = None,
+    ) -> ClaimLease:
         item_id = str(item.get("id", ""))
         version = item.get("version")
         if not item_id or not isinstance(version, int):
             raise TrackerError("candidate is missing id or version")
+        request_body: dict[str, Any] = {
+            "workerId": self.config.worker_id,
+            "expectedVersion": version,
+            "leaseSeconds": self.config.lease_seconds,
+        }
+        if profile is not None:
+            request_body["profile"] = profile
         try:
             payload = await self._request(
                 "POST",
                 self._item_path(item_id) + "/claim",
-                json={
-                    "workerId": self.config.worker_id,
-                    "expectedVersion": version,
-                    "leaseSeconds": self.config.lease_seconds,
-                },
+                json=request_body,
             )
         except TrackerError as error:
-            if error.status_code == 409:
-                raise ClaimConflict(str(error), status_code=409) from error
+            if error.status_code == 409 and error.error_code != "agent_profile_conflict":
+                raise ClaimConflict(
+                    str(error), status_code=409, error_code=error.error_code
+                ) from error
             raise
         if not isinstance(payload, dict):
             raise TrackerError("claim response must be an object")
         claimed = payload.get("work_item")
         token = payload.get("claim_token")
-        if not isinstance(claimed, dict) or not isinstance(token, str) or not token:
-            raise TrackerError("claim response is missing work_item or claim_token")
-        return ClaimLease(item=claimed, token=token)
+        attempt = payload.get("attempt")
+        if (
+            not isinstance(claimed, dict)
+            or not isinstance(token, str)
+            or not token
+            or not isinstance(attempt, dict)
+        ):
+            raise TrackerError("claim response is missing work_item, claim_token, or attempt")
+        return ClaimLease(item=claimed, token=token, attempt=attempt)
 
     async def heartbeat(self, lease: ClaimLease) -> dict[str, Any]:
         self._require_active(lease)
@@ -379,12 +402,16 @@ class ControlPlaneTracker:
             return response.json()
         try:
             payload = response.json()
-            message = payload.get("error", {}).get("message", response.text)
+            error_payload = payload.get("error", {})
+            message = error_payload.get("message", response.text)
+            error_code = error_payload.get("code")
         except (ValueError, AttributeError):
             message = response.text
+            error_code = None
         raise TrackerError(
             f"Control Plane returned {response.status_code}: {message}",
             status_code=response.status_code,
+            error_code=error_code if isinstance(error_code, str) else None,
         )
 
     def _item_path(self, item_id: str) -> str:

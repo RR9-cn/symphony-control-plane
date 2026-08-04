@@ -38,9 +38,10 @@
 ```powershell
 python -m pip install -r requirements-dev.txt
 python scripts/validate_protocol.py
+python scripts/validate_skills.py
 python -m pytest -q
 ```
 
 ## 当前状态
 
-实施方案前三步已实现。后端采用 SQLite，提供带 Bearer 认证的 WorkItem API、依赖候选查询、原子 Claim、Lease/Heartbeat、状态事件、Artifact、Agent Attempt 和人工决策。第三步主链为 Windows 原生 Python Runner，可直接启动 Windows 版 `codex app-server`，实现安全工作区、PowerShell Hook、并发调度、Heartbeat、指数退避和六个受限 Agent Tool，不依赖 WSL、Elixir 或 Mix。Elixir 叠加层保留为可选兼容参考。
+实施方案前五步已实现。后端采用 SQLite，提供带 Bearer 认证的 WorkItem API、依赖候选查询、原子 Claim、Lease/Heartbeat、状态事件、Artifact、Agent Attempt 和人工决策。Windows 原生 Python Runner 可直接启动 Windows 版 `codex app-server`，实现安全工作区、PowerShell Hook、Profile 路由与限流、Heartbeat、指数退避和六个受限 Agent Tool，不依赖 WSL、Elixir 或 Mix。第五步增加固定 Git commit 的 Skill 仓库、Profile allowlist 物理注入、Skill 兼容性校验、Codex 用户 Skill 隔离、`skills/list` 启动验证、Skill revision/content hash 执行快照和 `NeedsHuman` 恢复闭环。Elixir 叠加层保留为可选兼容参考。

@@ -106,6 +106,45 @@ class WorkItemView(ApiModel):
     updated_at: datetime
 
 
+class AgentProfileClaim(ApiModel):
+    name: str = Field(pattern=r"^[a-z][a-z0-9_]*$", max_length=100)
+    version: int = Field(ge=1)
+    config: dict[str, Any]
+
+    @model_validator(mode="after")
+    def validate_snapshot_identity(self) -> "AgentProfileClaim":
+        if self.config.get("profile_name") != self.name:
+            raise ValueError("profile config profile_name must match name")
+        if self.config.get("profile_version") != self.version:
+            raise ValueError("profile config profile_version must match version")
+        forbidden = {"token", "secret", "password", "credential", "api_key"}
+        if any(str(key).lower() in forbidden for key in self.config):
+            raise ValueError("profile config must not contain credentials")
+        return self
+
+
+class AgentProfileView(ApiModel):
+    id: str
+    name: str
+    version: int
+    config: dict[str, Any]
+    active: bool
+    created_at: datetime
+
+
+class AgentAttemptView(ApiModel):
+    id: str
+    work_item_id: str
+    attempt_number: int
+    worker_id: str
+    profile_id: str | None
+    profile_snapshot: dict[str, Any]
+    status: str
+    thread_id: str | None
+    started_at: datetime
+    completed_at: datetime | None
+
+
 class ClaimRequest(ApiModel):
     worker_id: str = Field(
         validation_alias=AliasChoices("worker_id", "workerId"), min_length=1
@@ -119,11 +158,13 @@ class ClaimRequest(ApiModel):
         ge=10,
         le=3600,
     )
+    profile: AgentProfileClaim | None = None
 
 
 class ClaimResult(ApiModel):
     work_item: WorkItemView
     claim_token: str
+    attempt: AgentAttemptView
 
 
 class HeartbeatRequest(ApiModel):

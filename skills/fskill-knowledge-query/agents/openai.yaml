@@ -1,0 +1,4 @@
+interface:
+  display_name: "Engineering Knowledge Query"
+  short_description: "Inspect optional local engineering knowledge and provenance"
+  default_prompt: "Use $fskill-knowledge-query to inspect available local engineering knowledge before technical analysis."

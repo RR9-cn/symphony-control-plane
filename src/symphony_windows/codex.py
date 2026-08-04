@@ -63,6 +63,7 @@ class CodexAppServer:
         turn_id = ""
         try:
             await self._initialize()
+            await self._validate_skills(workspace)
             thread_id = await self._start_thread(workspace, tracker)
             turn_id = await self._start_turn(workspace, prompt, issue, thread_id)
             status = await self._receive_turn(tracker, lease)
@@ -85,9 +86,27 @@ class CodexAppServer:
     async def _start(self, workspace: Path) -> None:
         if self._process is not None:
             raise CodexError("Codex app-server is already running")
+        original_home = Path.home().resolve()
         env = os.environ.copy()
         for name in self.secret_environment_names:
             env.pop(name, None)
+        if self.config.isolate_user_home:
+            isolated_home = workspace / ".symphony" / "user-home"
+            isolated_home.mkdir(parents=True, exist_ok=True)
+            codex_home = Path(
+                env.get("CODEX_HOME", str(original_home / ".codex"))
+            ).expanduser()
+            if codex_home.is_dir():
+                env["CODEX_HOME"] = str(codex_home.resolve())
+            else:
+                isolated_codex_home = isolated_home / ".codex"
+                isolated_codex_home.mkdir()
+                env["CODEX_HOME"] = str(isolated_codex_home)
+            env["HOME"] = str(isolated_home)
+            env["USERPROFILE"] = str(isolated_home)
+            if os.name == "nt" and isolated_home.drive:
+                env["HOMEDRIVE"] = isolated_home.drive
+                env["HOMEPATH"] = str(isolated_home)[len(isolated_home.drive) :]
         command = _shell_command(self.config.command)
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
         try:
@@ -104,6 +123,53 @@ class CodexAppServer:
         except OSError as error:
             raise CodexError(f"cannot launch Codex app-server: {error}") from error
         self._stderr_task = asyncio.create_task(self._drain_stderr())
+
+    async def _validate_skills(self, workspace: Path) -> None:
+        result = await self._request(
+            "skills/list",
+            {
+                "cwds": [str(workspace)],
+                "forceReload": True,
+            },
+        )
+        data = result.get("data") if isinstance(result, dict) else None
+        if not isinstance(data, list):
+            raise CodexError(f"invalid skills/list response: {result!r}")
+        entries: list[dict[str, Any]] = []
+        for group in data:
+            if not isinstance(group, dict):
+                continue
+            skills = group.get("skills")
+            if isinstance(skills, list):
+                entries.extend(skill for skill in skills if isinstance(skill, dict))
+
+        allowed = set(self.config.allowed_skills)
+        expected_root = (workspace / ".agents" / "skills").resolve()
+        found: set[str] = set()
+        unexpected_fshows: set[str] = set()
+        for entry in entries:
+            name = entry.get("name")
+            raw_path = entry.get("path")
+            if not isinstance(name, str):
+                continue
+            if name.startswith("fskill-") and name not in allowed:
+                unexpected_fshows.add(name)
+            if name not in allowed or not isinstance(raw_path, str):
+                continue
+            path = Path(raw_path).resolve()
+            expected = (expected_root / name / "SKILL.md").resolve()
+            if path == expected:
+                found.add(name)
+        missing = allowed - found
+        if missing or unexpected_fshows:
+            details: list[str] = []
+            if missing:
+                details.append(f"missing workspace skills: {', '.join(sorted(missing))}")
+            if unexpected_fshows:
+                details.append(
+                    f"unexpected Fshows skills: {', '.join(sorted(unexpected_fshows))}"
+                )
+            raise CodexError("Codex Skill allowlist validation failed: " + "; ".join(details))
 
     async def _initialize(self) -> None:
         await self._request(
@@ -124,14 +190,17 @@ class CodexAppServer:
         workspace: Path,
         tracker: ControlPlaneTracker,
     ) -> str:
+        params: dict[str, Any] = {
+            "approvalPolicy": self.config.approval_policy,
+            "sandbox": self.config.thread_sandbox,
+            "cwd": str(workspace),
+            "dynamicTools": tracker.tool_specs(),
+        }
+        if self.config.model is not None:
+            params["model"] = self.config.model
         result = await self._request(
             "thread/start",
-            {
-                "approvalPolicy": self.config.approval_policy,
-                "sandbox": self.config.thread_sandbox,
-                "cwd": str(workspace),
-                "dynamicTools": tracker.tool_specs(),
-            },
+            params,
         )
         thread = result.get("thread") if isinstance(result, dict) else None
         thread_id = thread.get("id") if isinstance(thread, dict) else None

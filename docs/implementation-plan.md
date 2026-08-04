@@ -592,6 +592,20 @@ sandbox: workspace-write
 - Profile 并发限制有效；
 - 执行历史可以还原使用的 Profile 版本。
 
+### 5.6 实现结果（2026-08-04）
+
+第四步已完成 Windows 原生实现：
+
+- `WORKFLOW.md` 必须声明至少一个 Agent Profile，配置加载时严格校验唯一 Role 匹配、版本、Prompt 文件边界、Skill 名称、沙箱、网络策略、并发上限和最大 Turn 数；
+- Runner 在 Claim 前按 `WorkItem.agent_role` 精确路由，找不到或出现重复 Profile 时将任务置为 `Blocked`，不回退默认 Builder；
+- 每个 Profile 使用独立 Prompt，并将 Skill allowlist、Profile 身份和执行策略写入最终 Prompt；
+- Profile 沙箱和网络策略转换为独立 Codex `thread/start` / `turn/start` 参数，Review Profile 使用 `read-only`；
+- 调度器同时执行全局和 Profile 级并发限制，并在超过 `max_turns` 且未形成 Handoff 时停止 continuation；
+- Claim 会原子登记 `agent_profiles` 版本，并把 Prompt SHA-256、Skill、模型、沙箱、网络和并发配置快照写入 `agent_attempts`；
+- 同名同版本配置发生变化时拒绝复用，保证热更新不改变已启动 Session，配置变化必须递增 Profile 版本；
+- 新增 Agent Profile 和 WorkItem Attempt 查询接口，执行历史可还原 Profile 版本和快照；
+- Builder 的 Control Plane/Release 凭据继续由宿主隔离，不进入 Profile Snapshot、Prompt、Tool Schema 或 Codex 子进程环境。
+
 ---
 
 ## 6. 第五步：实现 Skill 注入和版本固定
@@ -654,6 +668,21 @@ Skill 要求用户确认
 - 执行记录包含 Skill revision；
 - Skill 引用不存在时在启动前失败；
 - 不会在 Codex Turn 中无限等待人工输入。
+
+### 6.6 实现结果（2026-08-04）
+
+第五步已完成 Windows 原生实现：
+
+- `WORKFLOW.md` 新增必填 `skill_repository.url`、完整 40 位 commit `revision` 和 `skills_path`，Runner 使用无交互 Git checkout 缓存固定 revision；
+- Runner 启动时校验所有 Profile 的 Skill，任何缺失目录、缺失 `SKILL.md`、错误 Front Matter、断裂引用、符号链接逃逸、旧 Artifact 别名、未满足工具/凭据或越过 allowlist 的 Skill 依赖都会在 Claim 前失败；
+- 每次执行都会原子替换工作区 `.agents/skills`，只复制当前 Profile allowlist，并生成 `.agents/skills.lock.json`；
+- Profile Snapshot 将每个 Skill 的 Git revision、内容 SHA-256、工具、凭据名称、外部写操作和人工确认点写入 `agent_attempts`，源仓库的未提交或后续变化不会影响运行 Session；
+- Codex 子进程使用工作区隔离的用户 Home，同时保留宿主 `CODEX_HOME` 认证状态；Thread 启动前通过 App Server `skills/list` 确认声明 Skill 来自当前工作区，并拒绝额外的 `fskill-*`；
+- Skill 声明的凭据仅在宿主校验，名称进入审计快照，值继续从 Codex 子进程环境移除；
+- Profile Prompt 统一要求人工确认时调用 `work_item_request_human` 并结束 Turn，App Server 的运行期输入请求也转换为相同状态协议；
+- 新增人工决策查询接口，自动化测试覆盖 `Running → NeedsHuman → Ready`，Agent 不会在 Turn 中无限等待。
+- 已将 `D:\saasProject\fshows-skills` 中五个 Profile 使用的 7 个 Skill 复制到本仓库 `skills/`；修正技术分析 Skill 的旧 DDL、Task 和 Research 产物路径，源仓库保持不变。
+- `scripts/validate_skills.py` 固定 vendored Skill 集合并校验包结构、引用和内容摘要，纳入本地回归命令。
 
 ---
 

@@ -49,7 +49,111 @@ python -m pip install -r requirements-dev.txt
 Copy-Item WORKFLOW.windows.example.md WORKFLOW.md
 ```
 
-`WORKFLOW.md` 使用 Symphony SPEC 的 YAML Front Matter 和 Liquid Prompt。配置读取严格模式：缺少环境变量、未知 Prompt 变量、不安全 HTTP 地址和越界参数都会在启动前失败。
+`WORKFLOW.md` 使用 Symphony SPEC 的 YAML Front Matter 和 Liquid Prompt。配置读取严格模式：缺少环境变量、未知 Prompt 变量、不安全 HTTP 地址、重复角色匹配、不存在或越界的 Prompt 文件和越界参数都会在启动前失败。
+
+## Agent Profile 路由
+
+`agent_profiles` 是必填配置。每个 Profile 以 `match.agent_role` 精确匹配一个 WorkItem，并固定版本、Prompt、Skill 声明、沙箱、网络策略、并发上限和最大 Turn 数。例如：
+
+```yaml
+agent_profiles:
+  backend_builder:
+    version: 1
+    match:
+      agent_role: backend_builder
+    prompt_file: workflows/backend-builder.md
+    skills:
+      - fskill-code-java-guide
+      - fskill-knowledge-query
+    sandbox: workspace-write
+    network_access: true
+    max_concurrent_agents: 4
+    max_turns: 20
+```
+
+Profile 在 Claim 前解析。没有唯一匹配项的 WorkItem 会进入 `Blocked`，错误码为 `agent_profile_configuration_error`，不会静默使用其他角色。Profile Prompt 在 Runner 加载配置时读入内存；运行中的 Session 不受文件热更新影响。
+
+每次 Claim 会在 SQLite 中登记或复用对应的 `agent_profiles(name, version)`，并将以下无凭据快照写入 `agent_attempts.profile_snapshot`：
+
+```text
+profile_name / profile_version / agent_role
+prompt_file / prompt_hash / skills / model
+sandbox / network_access / max_concurrent_agents / max_turns
+```
+
+同一 Profile 名称和版本若出现不同快照会作为配置冲突阻断执行，配置变更必须递增版本。可通过以下接口还原执行历史：
+
+```http
+GET /api/agent-profiles
+GET /api/work-items/{id}/attempts
+```
+
+## Skill 仓库与版本固定
+
+Runner 要求配置固定的 Git revision，不会直接复制不断变化的全局 Skill 目录：
+
+```yaml
+skill_repository:
+  url: $FSHOWS_SKILLS_REPOSITORY
+  revision: $FSHOWS_SKILLS_REVISION
+  skills_path: skills
+```
+
+`revision` 必须是完整的 40 位 commit SHA。`url` 可以是本地 Git 仓库路径，也可以是 `https`、`ssh`、`git` 或 SCP 风格 Git 地址；URL 不允许内嵌密码或查询参数。首次启动会将指定 commit checkout 到宿主临时缓存，后续执行校验缓存的实际 `HEAD`。
+
+当前仓库已从 `D:\saasProject\fshows-skills` 复制五个 Profile 使用的 7 个 Skill 到 `skills/`。提交这些副本后，可将当前仓库及包含它们的 commit 作为固定 Skill 来源：
+
+```powershell
+$env:FSHOWS_SKILLS_REPOSITORY = "."
+$env:FSHOWS_SKILLS_REVISION = git -C $env:FSHOWS_SKILLS_REPOSITORY rev-parse HEAD
+```
+
+复制范围为：`fskill-analysis-tech`、`fskill-knowledge-query`、`fskill-tools-db`、`fskill-code-java-guide`、`fskill-code-review`、`fskill-test-explore` 和 `fskill-test-verify`。未复制源仓库 `delete/` 和当前五个 Profile 未引用的 Skill。
+
+每个 Skill 必须包含带 `name` 和 `description` 的 `SKILL.md` Front Matter。可在 Front Matter 中声明兼容性信息：
+
+```yaml
+metadata:
+  fshows:
+    artifact_paths:
+      - test/results/*.md
+      - orchestration/handoffs/*.yaml
+    human_confirmation:
+      - external_publish
+    external_writes:
+      - git_push
+    required_tools:
+      - git
+    required_credentials:
+      - EXAMPLE_HOST_ONLY_TOKEN
+    required_skills:
+      - fskill-knowledge-query
+```
+
+Runner 会检查 Markdown 中的 `references/`、`scripts/`、`assets/` 和相对链接，拒绝断裂引用、符号链接、旧 Artifact 路径、未安装工具、缺少的宿主凭据，以及未包含在同一 Profile allowlist 内的 `required_skills`。声明外部写操作时必须同时声明人工确认点。
+
+Codex 启动前，Runner 会用固定 revision 的副本完整替换：
+
+```text
+<workspace>/.agents/skills/
+```
+
+并生成 `.agents/skills.lock.json`。Codex 子进程使用隔离的用户 Home，避免加载 `$HOME/.agents/skills`；随后调用 `skills/list`，确保 Profile 声明的 Skill 来自当前 Workspace，并拒绝额外的 `fskill-*`。OpenAI 内置的 System Skill 仍由 Codex 自身提供，不属于业务 Profile allowlist。
+
+执行快照为每个 Skill 记录固定 Git revision 和目录内容 SHA-256。Skill 所需凭据的环境变量名称可进入快照，值不会写入快照、Prompt、Tool Schema 或 Codex 子进程环境。
+
+## 人工确认协议
+
+Profile Prompt 统一要求 Skill 遇到人工确认点时调用 `work_item_request_human` 并结束当前 Turn。Runner 也会把 App Server approval/input request 转换为同一流程：
+
+```text
+Running → NeedsHuman（清除 Claim）
+→ GET /api/work-items/{id}/decisions
+→ 人工 resolve decision
+→ Ready → Runner 重新领取
+```
+
+因此 Agent 不会在 Codex Turn 内持续等待用户输入。
 
 ## 启动
 
@@ -90,14 +194,15 @@ fshows-symphony-windows .\WORKFLOW.md
 1. 触发 Lease/Retry 维护；
 2. 查询依赖已满足的 `Ready` WorkItem；
 3. 按优先级、创建时间和 ID 排序；
-4. 在全局并发槽位内执行原子 Claim；
-5. 创建经过 Windows 保留名、路径穿越和根目录边界校验的工作区；
-6. 执行 `after_create`、`before_run` PowerShell Hook；
-7. 启动独立 `codex app-server` 并注册六个受限工具；
-8. 后台 Heartbeat，Claim 丢失时终止 Codex 进程树；
-9. 完成、Blocked 或 NeedsHuman 时清除本机 Claim；
-10. 普通 Turn 结束但未交接时安排 1 秒 continuation，异常按 10 秒指数退避；
-11. 执行 `after_run` Hook，保留工作区供下一次尝试复用。
+4. 精确匹配 Agent Profile，并同时检查全局与 Profile 并发槽位；
+5. 将 Profile 配置快照随原子 Claim 写入执行历史；
+6. 创建经过 Windows 保留名、路径穿越和根目录边界校验的工作区；
+7. 执行 `after_create`、`before_run` PowerShell Hook；
+8. 以 Profile Prompt、模型、沙箱和网络策略启动独立 `codex app-server`，并注册六个受限工具；
+9. 后台 Heartbeat，Claim 丢失时终止 Codex 进程树；
+10. 完成、Blocked 或 NeedsHuman 时清除本机 Claim；
+11. 普通 Turn 结束但未交接时安排 1 秒 continuation；达到 Profile `max_turns` 后阻断，异常按 10 秒指数退避；
+12. 执行 `after_run` Hook，保留工作区供下一次尝试复用。
 
 ## 安全边界
 
@@ -108,13 +213,14 @@ fshows-symphony-windows .\WORKFLOW.md
 - PowerShell Hooks 来自仓库拥有的 `WORKFLOW.md`，应只在可信仓库运行；
 - 默认审批策略拒绝沙箱提升、规则绕过和 MCP elicitation，并将需要输入的任务转换为 `NeedsHuman`。
 
-当前第三步实现覆盖核心轮询、并发、Claim、Heartbeat、工作区、Hook、Codex stdio、动态工具和失败退避。SPEC 中的配置热更新、终态工作区清理、运行状态 HTTP Dashboard、跨主机 Worker 和第四步 Agent Profile Router 不在本阶段范围。
+当前前五步实现覆盖核心轮询、并发、Claim、Heartbeat、工作区、Hook、Codex stdio、动态工具、失败退避、Agent Profile Router、Skill 物理注入、版本固定、兼容性校验和人工确认恢复协议。
 
 ## 验收
 
 ```powershell
 python -m pytest -q
 python scripts/validate_protocol.py
+python scripts/validate_skills.py
 ruff check src tests scripts
 ```
 

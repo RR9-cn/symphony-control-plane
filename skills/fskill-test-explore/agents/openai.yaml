@@ -1,0 +1,4 @@
+﻿interface:
+  display_name: "FSkill Test Explore"
+  short_description: "探索功能边界、触发入口、依赖服务和测试类型，并产出可校验的 harness 测试方案。"
+  default_prompt: "为这个功能生成 AI harness 测试方案"

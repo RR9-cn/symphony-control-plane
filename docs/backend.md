@@ -46,6 +46,10 @@ POST   /api/work-items/{id}/events
 GET    /api/work-items/{id}/events
 POST   /api/work-items/{id}/artifacts
 POST   /api/work-items/{id}/decisions
+GET    /api/work-items/{id}/decisions
+GET    /api/work-items/{id}/attempts
+
+GET    /api/agent-profiles
 
 POST   /api/maintenance/tick
 GET    /health
@@ -57,9 +61,20 @@ GET    /health
 {
   "workerId": "symphony-01",
   "expectedVersion": 12,
-  "leaseSeconds": 300
+  "leaseSeconds": 300,
+  "profile": {
+    "name": "backend_builder",
+    "version": 3,
+    "config": {
+      "profile_name": "backend_builder",
+      "profile_version": 3,
+      "prompt_hash": "..."
+    }
+  }
 }
 ```
+
+Profile 字段由 Windows Runner 生成；旧客户端可以省略。控制面会登记不可变的 Profile 版本并把配置快照写入本次 Agent Attempt。同名同版本的不同配置会返回冲突。
 
 Claim token 只在领取成功响应中返回一次。普通 WorkItem 响应仅展示 `worker_id` 和 `expires_at`，不会泄露 token。
 
@@ -98,4 +113,4 @@ python scripts/validate_protocol.py
 alembic check
 ```
 
-当前版本已实现 Symphony 宿主 Bearer 认证与 Claim Token 隔离，尚未实现第四步 Profile 路由。服务默认仅监听 `127.0.0.1`；通过非 loopback 网络部署时应使用 HTTPS，并继续通过网络策略限制访问来源。
+当前版本已实现 Symphony 宿主 Bearer 认证、Claim Token 隔离、Agent Profile 版本登记和 Attempt 配置快照。服务默认仅监听 `127.0.0.1`；通过非 loopback 网络部署时应使用 HTTPS，并继续通过网络策略限制访问来源。

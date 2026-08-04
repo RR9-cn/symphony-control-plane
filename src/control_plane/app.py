@@ -12,6 +12,8 @@ from control_plane.config import Settings
 from control_plane.database import Database
 from control_plane.errors import ControlPlaneError
 from control_plane.schemas import (
+    AgentAttemptView,
+    AgentProfileView,
     ArtifactCreate,
     ArtifactView,
     ClaimRequest,
@@ -152,6 +154,16 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
     ) -> list[WorkItemView]:
         return await service(session).candidates(limit)
 
+    @app.get("/api/agent-profiles", response_model=list[AgentProfileView])
+    async def list_agent_profiles(session: Session) -> list[AgentProfileView]:
+        return await service(session).list_agent_profiles()
+
+    @app.get(
+        "/api/work-items/{item_id}/attempts", response_model=list[AgentAttemptView]
+    )
+    async def list_attempts(item_id: str, session: Session) -> list[AgentAttemptView]:
+        return await service(session).list_attempts(item_id)
+
     @app.get("/api/work-items/{item_id}", response_model=WorkItemView)
     async def get_work_item(item_id: str, session: Session) -> WorkItemView:
         return await service(session).get_work_item(item_id)
@@ -213,6 +225,10 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
         item_id: str, command: DecisionCommand, session: Session
     ) -> DecisionView:
         return await service(session).decision(item_id, command)
+
+    @app.get("/api/work-items/{item_id}/decisions", response_model=list[DecisionView])
+    async def list_decisions(item_id: str, session: Session) -> list[DecisionView]:
+        return await service(session).list_decisions(item_id)
 
     @app.post("/api/maintenance/tick", response_model=MaintenanceResult)
     async def maintenance_tick(session: Session) -> MaintenanceResult:
