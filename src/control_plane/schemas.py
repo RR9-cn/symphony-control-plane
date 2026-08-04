@@ -9,7 +9,9 @@ from control_plane.protocol import PROTOCOL, ROLE_STAGE
 
 
 class ApiModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", from_attributes=True, populate_by_name=True)
+    model_config = ConfigDict(
+        extra="forbid", from_attributes=True, populate_by_name=True
+    )
 
 
 class RepositoryData(ApiModel):
@@ -64,7 +66,9 @@ class WorkItemCreate(ApiModel):
         if self.agent_role not in ROLE_STAGE:
             raise ValueError(f"unknown agent_role: {self.agent_role}")
         if ROLE_STAGE[self.agent_role] != self.stage:
-            raise ValueError(f"{self.agent_role} requires stage {ROLE_STAGE[self.agent_role]}")
+            raise ValueError(
+                f"{self.agent_role} requires stage {ROLE_STAGE[self.agent_role]}"
+            )
         if len(set(self.dependencies)) != len(self.dependencies):
             raise ValueError("dependencies must be unique")
         return self
@@ -165,6 +169,8 @@ class ClaimResult(ApiModel):
     work_item: WorkItemView
     claim_token: str
     attempt: AgentAttemptView
+    resume_thread_id: str | None = None
+    continuation_turn_count: int = Field(default=0, ge=0)
 
 
 class HeartbeatRequest(ApiModel):
@@ -189,6 +195,12 @@ class ReleaseRequest(ApiModel):
         validation_alias=AliasChoices("retry_delay_seconds", "retryDelaySeconds"),
         ge=0,
         le=86_400,
+    )
+    thread_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("thread_id", "threadId"),
+        min_length=1,
+        max_length=200,
     )
 
 
@@ -265,7 +277,9 @@ class DecisionCommand(ApiModel):
         if self.action == "request" and not self.question:
             raise ValueError("question is required when action=request")
         if self.action == "resolve" and (not self.decision_id or not self.response):
-            raise ValueError("decision_id and response are required when action=resolve")
+            raise ValueError(
+                "decision_id and response are required when action=resolve"
+            )
         return self
 
 

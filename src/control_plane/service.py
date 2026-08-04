@@ -91,12 +91,19 @@ class ControlPlaneService:
                 raise ConflictError(f"work item already exists: {command.id}")
             if await self.session.get(Feature, command.feature_id) is None:
                 raise NotFoundError(f"feature not found: {command.feature_id}")
-            if command.parent_id and await self.session.get(WorkItem, command.parent_id) is None:
+            if (
+                command.parent_id
+                and await self.session.get(WorkItem, command.parent_id) is None
+            ):
                 raise NotFoundError(f"parent work item not found: {command.parent_id}")
-            dependencies = await self._require_dependencies(command.dependencies, command.feature_id)
+            dependencies = await self._require_dependencies(
+                command.dependencies, command.feature_id
+            )
             if command.id in command.dependencies:
                 raise ConflictError("work item cannot depend on itself")
-            if command.status == "ready" and any(item.status != "done" for item in dependencies):
+            if command.status == "ready" and any(
+                item.status != "done" for item in dependencies
+            ):
                 raise ConflictError("ready work item has incomplete dependencies")
 
             work_item = WorkItem(
@@ -156,21 +163,31 @@ class ControlPlaneService:
         items = (await self.session.scalars(statement)).all()
         return [await self._view(item) for item in items]
 
-    async def patch_work_item(self, item_id: str, command: WorkItemPatch) -> WorkItemView:
+    async def patch_work_item(
+        self, item_id: str, command: WorkItemPatch
+    ) -> WorkItemView:
         async with self.session.begin():
             current = await self.session.get(WorkItem, item_id)
             if current is None:
                 raise NotFoundError(f"work item not found: {item_id}")
-            changes = command.model_dump(exclude={"expected_version", "dependencies"}, exclude_none=True)
+            changes = command.model_dump(
+                exclude={"expected_version", "dependencies"}, exclude_none=True
+            )
             if "repository" in changes:
                 changes["repository"] = command.repository.model_dump()  # type: ignore[union-attr]
             if command.dependencies is not None:
                 if current.status != "draft":
-                    raise ConflictError("dependencies may only be changed while status=draft")
+                    raise ConflictError(
+                        "dependencies may only be changed while status=draft"
+                    )
                 if item_id in command.dependencies:
                     raise ConflictError("work item cannot depend on itself")
-                await self._require_dependencies(command.dependencies, current.feature_id)
-                if await self._would_create_dependency_cycle(item_id, command.dependencies):
+                await self._require_dependencies(
+                    command.dependencies, current.feature_id
+                )
+                if await self._would_create_dependency_cycle(
+                    item_id, command.dependencies
+                ):
                     raise ConflictError("dependency update would create a cycle")
             result = await self.session.execute(
                 update(WorkItem)
@@ -184,7 +201,9 @@ class ControlPlaneService:
                 raise ConflictError("work item version changed")
             if command.dependencies is not None:
                 await self.session.execute(
-                    delete(WorkItemDependency).where(WorkItemDependency.work_item_id == item_id)
+                    delete(WorkItemDependency).where(
+                        WorkItemDependency.work_item_id == item_id
+                    )
                 )
                 self.session.add_all(
                     WorkItemDependency(work_item_id=item_id, depends_on_id=dependency)
@@ -264,12 +283,40 @@ class ControlPlaneService:
             )
             if result.rowcount != 1:
                 await self._raise_claim_conflict(item_id, command.expected_version)
-            latest_attempt_number = await self.session.scalar(
-                select(func.coalesce(func.max(AgentAttempt.attempt_number), 0)).where(
-                    AgentAttempt.work_item_id == item_id
-                )
+            previous_attempt = await self.session.scalar(
+                select(AgentAttempt)
+                .where(AgentAttempt.work_item_id == item_id)
+                .order_by(AgentAttempt.attempt_number.desc())
+                .limit(1)
             )
-            attempt_number = (latest_attempt_number or 0) + 1
+            attempt_number = (
+                previous_attempt.attempt_number + 1
+                if previous_attempt is not None
+                else 1
+            )
+            resume_thread_id: str | None = None
+            continuation_turn_count = 0
+            if (
+                previous_attempt is not None
+                and previous_attempt.status in {"retry_queued", "stage_review"}
+                and previous_attempt.thread_id
+                and command.profile is not None
+                and previous_attempt.profile_snapshot.get("profile_name")
+                == command.profile.name
+                and previous_attempt.profile_snapshot.get("profile_version")
+                == command.profile.version
+            ):
+                resume_thread_id = previous_attempt.thread_id
+                continuation_turn_count = int(
+                    await self.session.scalar(
+                        select(func.count(AgentAttempt.id)).where(
+                            AgentAttempt.work_item_id == item_id,
+                            AgentAttempt.thread_id == resume_thread_id,
+                            AgentAttempt.status == "retry_queued",
+                        )
+                    )
+                    or 0
+                )
             attempt = AgentAttempt(
                 work_item_id=item_id,
                 attempt_number=attempt_number,
@@ -290,13 +337,17 @@ class ControlPlaneService:
                     "lease_seconds": command.lease_seconds,
                     "attempt": attempt_number,
                     "profile_name": command.profile.name if command.profile else None,
-                    "profile_version": command.profile.version if command.profile else None,
+                    "profile_version": command.profile.version
+                    if command.profile
+                    else None,
                 },
             )
         return ClaimResult(
             work_item=await self.get_work_item(item_id),
             claim_token=token,
             attempt=AgentAttemptView.model_validate(attempt),
+            resume_thread_id=resume_thread_id,
+            continuation_turn_count=continuation_turn_count,
         )
 
     async def list_agent_profiles(self) -> list[AgentProfileView]:
@@ -340,7 +391,9 @@ class ControlPlaneService:
                 )
             )
             if result.rowcount != 1:
-                raise ClaimError("claim is missing, expired, or owned by another worker")
+                raise ClaimError(
+                    "claim is missing, expired, or owned by another worker"
+                )
             self._add_event(
                 item_id,
                 "heartbeat",
@@ -356,6 +409,8 @@ class ControlPlaneService:
         payload: dict[str, Any] = {"reason": command.reason}
         if command.retry_delay_seconds is not None:
             payload["retry_delay_seconds"] = command.retry_delay_seconds
+        if command.thread_id is not None:
+            payload["thread_id"] = command.thread_id
         transition = StatusTransitionRequest(
             to_status="retry_queued",
             event="retry_scheduled",
@@ -374,7 +429,9 @@ class ControlPlaneService:
                 raise NotFoundError(f"work item not found: {item_id}")
             from_status = item.status
             try:
-                definition = PROTOCOL.transition(from_status, command.to_status, command.event)
+                definition = PROTOCOL.transition(
+                    from_status, command.to_status, command.event
+                )
             except ValueError as error:
                 raise InvalidTransitionError(str(error)) from error
             self._verify_transition_actor(definition.actor, command.actor_type)
@@ -398,9 +455,7 @@ class ControlPlaneService:
                 )
                 if not isinstance(retry_delay, int) or not 0 <= retry_delay <= 86_400:
                     raise InvalidTransitionError("invalid retry_delay_seconds")
-                values["retry_at"] = utc_now() + timedelta(
-                    seconds=retry_delay
-                )
+                values["retry_at"] = utc_now() + timedelta(seconds=retry_delay)
             if command.to_status == "blocked":
                 values["blocker"] = command.payload["blocker"]
             if command.to_status == "ready":
@@ -429,7 +484,11 @@ class ControlPlaneService:
             if command.to_status == "done":
                 await self._record_dependency_satisfied(item_id)
             if from_status == "running" and command.to_status != "running":
-                await self._finish_latest_attempt(item_id, command.to_status)
+                await self._finish_latest_attempt(
+                    item_id,
+                    command.to_status,
+                    command.payload.get("thread_id"),
+                )
         return await self.get_work_item(item_id)
 
     async def add_event(self, item_id: str, command: EventCreate) -> EventView:
@@ -671,7 +730,9 @@ class ControlPlaneService:
                     WorkItem.status == "needs_human",
                     WorkItem.version == item.version,
                 )
-                .values(status="ready", version=WorkItem.version + 1, updated_at=utc_now())
+                .values(
+                    status="ready", version=WorkItem.version + 1, updated_at=utc_now()
+                )
             )
             if result.rowcount != 1:
                 raise ConflictError("work item changed while resolving decision")
@@ -689,25 +750,46 @@ class ControlPlaneService:
     async def _validate_transition_guards(
         self, item: WorkItem, command: StatusTransitionRequest
     ) -> None:
-        if command.to_status == "ready" and await self._has_incomplete_dependencies(item.id):
+        if command.to_status == "ready" and await self._has_incomplete_dependencies(
+            item.id
+        ):
             raise InvalidTransitionError("dependencies are not done")
         if command.event == "agent_completed":
             handoff_path = f"orchestration/handoffs/{item.id}.yaml"
-            handoff = await self.session.scalar(
-                select(WorkItemArtifact.id).where(
-                    WorkItemArtifact.work_item_id == item.id,
-                    WorkItemArtifact.direction == "output",
-                    WorkItemArtifact.path == handoff_path,
+            artifact_paths = (
+                await self.session.scalars(
+                    select(WorkItemArtifact.path).where(
+                        WorkItemArtifact.work_item_id == item.id,
+                        WorkItemArtifact.direction == "output",
+                    )
                 )
+            ).all()
+            nested_suffix = f"/{handoff_path}"
+            has_handoff = any(
+                path == handoff_path
+                or (
+                    path.endswith(nested_suffix)
+                    and "\\" not in path
+                    and ".." not in path.split("/")
+                )
+                for path in artifact_paths
             )
-            if handoff is None:
-                raise InvalidTransitionError(f"missing Handoff artifact: {handoff_path}")
+            if not has_handoff:
+                raise InvalidTransitionError(
+                    f"missing Handoff artifact: {handoff_path}"
+                )
         if command.to_status == "blocked" and not command.payload.get("blocker"):
             raise InvalidTransitionError("blocked transition requires payload.blocker")
-        if command.event == "blocker_resolved" and not command.payload.get("resolution"):
+        if command.event == "blocker_resolved" and not command.payload.get(
+            "resolution"
+        ):
             raise InvalidTransitionError("blocker_resolved requires payload.resolution")
-        if command.event == "stage_rejected" and not command.payload.get("rework_reason"):
-            raise InvalidTransitionError("stage_rejected requires payload.rework_reason")
+        if command.event == "stage_rejected" and not command.payload.get(
+            "rework_reason"
+        ):
+            raise InvalidTransitionError(
+                "stage_rejected requires payload.rework_reason"
+            )
         if command.event == "rework_queued" and not command.payload.get("rework_scope"):
             raise InvalidTransitionError("rework_queued requires payload.rework_scope")
         if command.event == "retry_due":
@@ -721,7 +803,9 @@ class ControlPlaneService:
                 )
             )
             if open_decision is None:
-                raise InvalidTransitionError("human transition requires an open decision")
+                raise InvalidTransitionError(
+                    "human transition requires an open decision"
+                )
         if command.event == "human_decision_resolved":
             resolved_decision = await self.session.scalar(
                 select(HumanDecision.id).where(
@@ -772,11 +856,15 @@ class ControlPlaneService:
         if not dependency_ids:
             return []
         items = (
-            await self.session.scalars(select(WorkItem).where(WorkItem.id.in_(dependency_ids)))
+            await self.session.scalars(
+                select(WorkItem).where(WorkItem.id.in_(dependency_ids))
+            )
         ).all()
         if len(items) != len(set(dependency_ids)):
             found = {item.id for item in items}
-            raise NotFoundError(f"dependencies not found: {sorted(set(dependency_ids) - found)}")
+            raise NotFoundError(
+                f"dependencies not found: {sorted(set(dependency_ids) - found)}"
+            )
         if any(item.feature_id != feature_id for item in items):
             raise ConflictError("dependencies must belong to the same feature")
         return list(items)
@@ -784,10 +872,14 @@ class ControlPlaneService:
     async def _would_create_dependency_cycle(
         self, item_id: str, proposed_dependencies: list[str]
     ) -> bool:
-        pairs = (await self.session.execute(select(
-            WorkItemDependency.work_item_id,
-            WorkItemDependency.depends_on_id,
-        ))).all()
+        pairs = (
+            await self.session.execute(
+                select(
+                    WorkItemDependency.work_item_id,
+                    WorkItemDependency.depends_on_id,
+                )
+            )
+        ).all()
         graph: dict[str, set[str]] = {}
         for source, target in pairs:
             if source != item_id:
@@ -846,7 +938,9 @@ class ControlPlaneService:
         self, item_id: str, direction: str, artifacts: list[ArtifactData]
     ) -> None:
         self.session.add_all(
-            WorkItemArtifact(work_item_id=item_id, direction=direction, **artifact.model_dump())
+            WorkItemArtifact(
+                work_item_id=item_id, direction=direction, **artifact.model_dump()
+            )
             for artifact in artifacts
         )
 
@@ -891,15 +985,25 @@ class ControlPlaneService:
                 {"dependency_id": completed_id},
             )
 
-    async def _finish_latest_attempt(self, item_id: str, status: str) -> None:
+    async def _finish_latest_attempt(
+        self,
+        item_id: str,
+        status: str,
+        thread_id: object = None,
+    ) -> None:
         attempt = await self.session.scalar(
             select(AgentAttempt)
-            .where(AgentAttempt.work_item_id == item_id, AgentAttempt.completed_at.is_(None))
+            .where(
+                AgentAttempt.work_item_id == item_id,
+                AgentAttempt.completed_at.is_(None),
+            )
             .order_by(AgentAttempt.attempt_number.desc())
             .limit(1)
         )
         if attempt:
             attempt.status = status
+            if isinstance(thread_id, str) and thread_id:
+                attempt.thread_id = thread_id
             attempt.completed_at = utc_now()
 
     async def _view(self, item: WorkItem) -> WorkItemView:
@@ -917,7 +1021,10 @@ class ControlPlaneService:
             (
                 await self.session.scalars(
                     select(WorkItemDependency.depends_on_id)
-                    .join(prerequisite, prerequisite.id == WorkItemDependency.depends_on_id)
+                    .join(
+                        prerequisite,
+                        prerequisite.id == WorkItemDependency.depends_on_id,
+                    )
                     .where(
                         WorkItemDependency.work_item_id == item.id,
                         prerequisite.status != "done",
@@ -933,9 +1040,15 @@ class ControlPlaneService:
                 .order_by(WorkItemArtifact.created_at, WorkItemArtifact.id)
             )
         ).all()
-        inputs = [ArtifactData.model_validate(value) for value in artifacts if value.direction == "input"]
+        inputs = [
+            ArtifactData.model_validate(value)
+            for value in artifacts
+            if value.direction == "input"
+        ]
         outputs = [
-            ArtifactData.model_validate(value) for value in artifacts if value.direction == "output"
+            ArtifactData.model_validate(value)
+            for value in artifacts
+            if value.direction == "output"
         ]
         return WorkItemView(
             id=item.id,

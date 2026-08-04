@@ -93,15 +93,10 @@ agent_profiles:
 codex:
   command: codex app-server
   isolate_user_home: true
-  approval_policy:
-    reject:
-      sandbox_approval: true
-      rules: true
-      mcp_elicitations: true
-  thread_sandbox: workspace-write
+  approval_policy: never
+  thread_sandbox: danger-full-access
   turn_sandbox_policy:
-    type: workspaceWrite
-    networkAccess: false
+    type: dangerFullAccess
 ---
 
 You are working on WorkItem {{ issue.identifier }}.

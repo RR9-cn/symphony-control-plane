@@ -57,6 +57,7 @@ class CodexAppServer:
         issue: dict[str, Any],
         tracker: ControlPlaneTracker,
         lease: ClaimLease,
+        resume_thread_id: str | None = None,
     ) -> CodexRunResult:
         await self._start(workspace)
         thread_id = ""
@@ -64,9 +65,21 @@ class CodexAppServer:
         try:
             await self._initialize()
             await self._validate_skills(workspace)
-            thread_id = await self._start_thread(workspace, tracker)
+            thread_id = await self._open_thread(
+                workspace,
+                tracker,
+                resume_thread_id=resume_thread_id,
+            )
             turn_id = await self._start_turn(workspace, prompt, issue, thread_id)
-            status = await self._receive_turn(tracker, lease)
+            try:
+                status = await asyncio.wait_for(
+                    self._receive_turn(tracker, lease, thread_id),
+                    timeout=self.config.turn_timeout_ms / 1000,
+                )
+            except TimeoutError as error:
+                raise CodexError(
+                    f"Codex turn exceeded {self.config.turn_timeout_ms}ms"
+                ) from error
             return CodexRunResult(status=status, thread_id=thread_id, turn_id=turn_id)
         finally:
             await self.stop()
@@ -96,12 +109,14 @@ class CodexAppServer:
             codex_home = Path(
                 env.get("CODEX_HOME", str(original_home / ".codex"))
             ).expanduser()
+            isolated_codex_home = isolated_home / ".codex"
+            isolated_codex_home.mkdir(exist_ok=True)
             if codex_home.is_dir():
-                env["CODEX_HOME"] = str(codex_home.resolve())
-            else:
-                isolated_codex_home = isolated_home / ".codex"
-                isolated_codex_home.mkdir()
-                env["CODEX_HOME"] = str(isolated_codex_home)
+                for auth_name in ("auth.json", ".cockpit_codex_auth.json"):
+                    source = codex_home / auth_name
+                    if source.is_file():
+                        shutil.copy2(source, isolated_codex_home / auth_name)
+            env["CODEX_HOME"] = str(isolated_codex_home)
             env["HOME"] = str(isolated_home)
             env["USERPROFILE"] = str(isolated_home)
             if os.name == "nt" and isolated_home.drive:
@@ -164,12 +179,16 @@ class CodexAppServer:
         if missing or unexpected_fshows:
             details: list[str] = []
             if missing:
-                details.append(f"missing workspace skills: {', '.join(sorted(missing))}")
+                details.append(
+                    f"missing workspace skills: {', '.join(sorted(missing))}"
+                )
             if unexpected_fshows:
                 details.append(
                     f"unexpected Fshows skills: {', '.join(sorted(unexpected_fshows))}"
                 )
-            raise CodexError("Codex Skill allowlist validation failed: " + "; ".join(details))
+            raise CodexError(
+                "Codex Skill allowlist validation failed: " + "; ".join(details)
+            )
 
     async def _initialize(self) -> None:
         await self._request(
@@ -185,11 +204,16 @@ class CodexAppServer:
         )
         await self._send({"method": "initialized", "params": {}})
 
-    async def _start_thread(
+    async def _open_thread(
         self,
         workspace: Path,
         tracker: ControlPlaneTracker,
+        *,
+        resume_thread_id: str | None,
     ) -> str:
+        if resume_thread_id is not None:
+            logger.info("resuming Codex thread %s", resume_thread_id)
+            return await self._resume_thread(workspace, resume_thread_id)
         params: dict[str, Any] = {
             "approvalPolicy": self.config.approval_policy,
             "sandbox": self.config.thread_sandbox,
@@ -198,6 +222,8 @@ class CodexAppServer:
         }
         if self.config.model is not None:
             params["model"] = self.config.model
+        if self.config.effort is not None:
+            params["effort"] = self.config.effort
         result = await self._request(
             "thread/start",
             params,
@@ -208,6 +234,22 @@ class CodexAppServer:
             raise CodexError(f"invalid thread/start response: {result!r}")
         return thread_id
 
+    async def _resume_thread(self, workspace: Path, thread_id: str) -> str:
+        params: dict[str, Any] = {
+            "threadId": thread_id,
+            "approvalPolicy": self.config.approval_policy,
+            "sandbox": self.config.thread_sandbox,
+            "cwd": str(workspace),
+        }
+        if self.config.model is not None:
+            params["model"] = self.config.model
+        result = await self._request("thread/resume", params)
+        thread = result.get("thread") if isinstance(result, dict) else None
+        resumed_id = thread.get("id") if isinstance(thread, dict) else None
+        if resumed_id != thread_id:
+            raise CodexError(f"invalid thread/resume response: {result!r}")
+        return resumed_id
+
     async def _start_turn(
         self,
         workspace: Path,
@@ -216,17 +258,17 @@ class CodexAppServer:
         thread_id: str,
     ) -> str:
         identifier = issue.get("identifier") or issue.get("id")
-        result = await self._request(
-            "turn/start",
-            {
-                "threadId": thread_id,
-                "input": [{"type": "text", "text": prompt}],
-                "cwd": str(workspace),
-                "title": f"{identifier}: {issue.get('title', '')}",
-                "approvalPolicy": self.config.approval_policy,
-                "sandboxPolicy": self.config.turn_sandbox_policy,
-            },
-        )
+        params: dict[str, Any] = {
+            "threadId": thread_id,
+            "input": [{"type": "text", "text": prompt}],
+            "cwd": str(workspace),
+            "title": f"{identifier}: {issue.get('title', '')}",
+            "approvalPolicy": self.config.approval_policy,
+            "sandboxPolicy": self.config.turn_sandbox_policy,
+        }
+        if self.config.effort is not None:
+            params["effort"] = self.config.effort
+        result = await self._request("turn/start", params)
         turn = result.get("turn") if isinstance(result, dict) else None
         turn_id = turn.get("id") if isinstance(turn, dict) else None
         if not isinstance(turn_id, str) or not turn_id:
@@ -237,6 +279,7 @@ class CodexAppServer:
         self,
         tracker: ControlPlaneTracker,
         lease: ClaimLease,
+        thread_id: str,
     ) -> str:
         silence_timeout_ms = (
             self.config.stall_timeout_ms
@@ -253,7 +296,12 @@ class CodexAppServer:
                 raise CodexError(f"Codex {method}: {message.get('params')!r}")
             if method == "item/tool/call" and "id" in message:
                 name, arguments = _tool_call(message.get("params"))
-                execution = await tracker.execute_tool(lease, name, arguments)
+                execution = await tracker.execute_tool(
+                    lease,
+                    name,
+                    arguments,
+                    thread_id=thread_id,
+                )
                 await self._send({"id": message["id"], "result": execution.response})
                 if execution.stop_agent:
                     return "work_item_released"
@@ -289,7 +337,9 @@ class CodexAppServer:
         try:
             await process.stdin.drain()
         except (BrokenPipeError, ConnectionResetError) as error:
-            raise CodexError(self._exit_details("Codex app-server closed stdin")) from error
+            raise CodexError(
+                self._exit_details("Codex app-server closed stdin")
+            ) from error
 
     async def _read_message(self, timeout_ms: int) -> dict[str, Any]:
         process = self._require_process()
@@ -301,7 +351,9 @@ class CodexAppServer:
                 timeout=timeout_ms / 1000,
             )
         except TimeoutError as error:
-            raise CodexError(f"Codex app-server was silent for {timeout_ms}ms") from error
+            raise CodexError(
+                f"Codex app-server was silent for {timeout_ms}ms"
+            ) from error
         if not line:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(process.wait(), timeout=1)
@@ -310,7 +362,9 @@ class CodexAppServer:
             payload = json.loads(line)
         except json.JSONDecodeError as error:
             text = line.decode("utf-8", errors="replace").strip()
-            raise CodexError(f"invalid JSON from Codex app-server: {text[:500]}") from error
+            raise CodexError(
+                f"invalid JSON from Codex app-server: {text[:500]}"
+            ) from error
         if not isinstance(payload, dict):
             raise CodexError("Codex app-server message must be an object")
         return payload
@@ -325,6 +379,36 @@ class CodexAppServer:
             logger.debug("codex stderr: %s", text)
 
     async def _emit(self, message: dict[str, Any]) -> None:
+        method = message.get("method")
+        params = message.get("params")
+        if method in {"item/started", "item/completed"} and isinstance(params, dict):
+            item = params.get("item")
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                if item_type == "commandExecution":
+                    command = str(item.get("command") or "").replace("\n", " ")[:300]
+                    logger.info(
+                        "codex %s type=%s status=%s exit=%s command=%s",
+                        method,
+                        item_type,
+                        item.get("status"),
+                        item.get("exitCode"),
+                        command,
+                    )
+                elif item_type == "agentMessage" and method == "item/completed":
+                    text = str(item.get("text") or "").replace("\n", " ")[:500]
+                    logger.info("codex agentMessage=%s", text)
+                else:
+                    logger.info(
+                        "codex %s type=%s status=%s",
+                        method,
+                        item_type,
+                        item.get("status"),
+                    )
+        elif method in {"turn/started", "turn/completed", "turn/failed"}:
+            logger.info("codex %s", method)
+        else:
+            logger.debug("codex event method=%s id=%s", method, message.get("id"))
         if self.on_event is None:
             return
         result = self.on_event(message)
@@ -413,7 +497,10 @@ def _tool_call(params: Any) -> tuple[str | None, dict[str, Any]]:
     if isinstance(arguments, str):
         with contextlib.suppress(json.JSONDecodeError):
             arguments = json.loads(arguments)
-    return (name if isinstance(name, str) else None, arguments if isinstance(arguments, dict) else {})
+    return (
+        name if isinstance(name, str) else None,
+        arguments if isinstance(arguments, dict) else {},
+    )
 
 
 def _looks_like_input_request(method: str) -> bool:

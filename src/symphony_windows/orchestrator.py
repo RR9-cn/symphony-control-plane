@@ -48,7 +48,9 @@ class WindowsSymphony:
         self.workflow = workflow
         self.tracker = tracker or ControlPlaneTracker(workflow.tracker)
         self._owns_tracker = tracker is None
-        self.workspace_manager = workspace_manager or WorkspaceManager(workflow.workspace)
+        self.workspace_manager = workspace_manager or WorkspaceManager(
+            workflow.workspace
+        )
         self.skill_manager = skill_manager or SkillManager(
             workflow.skill_repository, workflow.agent_profiles
         )
@@ -219,6 +221,13 @@ class WindowsSymphony:
             ):
                 attempt_number = lease.attempt["attempt_number"]
             prompt = profile.render_prompt(issue, attempt_number)
+            if lease.resume_thread_id is not None:
+                prompt = (
+                    "Continue the existing WorkItem in this resumed Codex thread. "
+                    "Reuse prior analysis and completed sub-agent results; do not "
+                    "restart discovery. Finish the remaining scoped work and handoff.\n\n"
+                    + prompt
+                )
             codex = self.codex_factory(
                 profile.codex_config(self.workflow.codex),
                 secret_environment_names=tuple(
@@ -231,7 +240,14 @@ class WindowsSymphony:
                 ),
             )
             codex_task = asyncio.create_task(
-                codex.run(workspace, prompt, issue, self.tracker, lease)
+                codex.run(
+                    workspace,
+                    prompt,
+                    issue,
+                    self.tracker,
+                    lease,
+                    resume_thread_id=lease.resume_thread_id,
+                )
             )
             heartbeat_task = asyncio.create_task(self._heartbeat_loop(lease))
             done, _pending = await asyncio.wait(
@@ -251,7 +267,7 @@ class WindowsSymphony:
                 await heartbeat_task
 
             if result.status == "turn_completed" and lease.active:
-                turns = self._retry_attempts.get(item_id, 0) + 1
+                turns = lease.continuation_turn_count + 1
                 if turns >= profile.max_turns:
                     await self.tracker.execute_tool(
                         lease,
@@ -275,8 +291,8 @@ class WindowsSymphony:
                     lease,
                     "codex_turn_completed_without_handoff",
                     retry_delay_seconds=1,
+                    thread_id=result.thread_id,
                 )
-                self._retry_attempts[item_id] = turns
                 return AttemptOutcome(
                     item_id=item_id,
                     status="continuation_queued",
@@ -302,7 +318,13 @@ class WindowsSymphony:
                         retry_delay_seconds=1,
                     )
             raise
-        except (CodexError, TrackerError, WorkflowError, WorkspaceError, OSError) as error:
+        except (
+            CodexError,
+            TrackerError,
+            WorkflowError,
+            WorkspaceError,
+            OSError,
+        ) as error:
             attempt = self._retry_attempts.get(item_id, 0) + 1
             self._retry_attempts[item_id] = attempt
             if lease.active:
@@ -317,7 +339,9 @@ class WindowsSymphony:
                         retry_delay_seconds=max(1, delay),
                     )
             logger.exception("WorkItem %s failed", item_id)
-            return AttemptOutcome(item_id=item_id, status="retry_queued", error=str(error))
+            return AttemptOutcome(
+                item_id=item_id, status="retry_queued", error=str(error)
+            )
         finally:
             if heartbeat_task and not heartbeat_task.done():
                 heartbeat_task.cancel()

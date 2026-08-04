@@ -34,6 +34,8 @@ class ClaimLease:
     item: dict[str, Any]
     token: str
     attempt: dict[str, Any] | None = None
+    resume_thread_id: str | None = None
+    continuation_turn_count: int = 0
     active: bool = True
 
     @property
@@ -72,7 +74,9 @@ class ControlPlaneTracker:
         await self._client.aclose()
 
     async def candidates(self, limit: int = 100) -> list[dict[str, Any]]:
-        payload = await self._request("GET", "/api/work-items/candidates", params={"limit": limit})
+        payload = await self._request(
+            "GET", "/api/work-items/candidates", params={"limit": limit}
+        )
         if not isinstance(payload, list):
             raise TrackerError("candidate response must be a list")
         return [item for item in payload if isinstance(item, dict)]
@@ -106,7 +110,10 @@ class ControlPlaneTracker:
                 json=request_body,
             )
         except TrackerError as error:
-            if error.status_code == 409 and error.error_code != "agent_profile_conflict":
+            if (
+                error.status_code == 409
+                and error.error_code != "agent_profile_conflict"
+            ):
                 raise ClaimConflict(
                     str(error), status_code=409, error_code=error.error_code
                 ) from error
@@ -116,14 +123,27 @@ class ControlPlaneTracker:
         claimed = payload.get("work_item")
         token = payload.get("claim_token")
         attempt = payload.get("attempt")
+        resume_thread_id = payload.get("resume_thread_id")
+        continuation_turn_count = payload.get("continuation_turn_count", 0)
         if (
             not isinstance(claimed, dict)
             or not isinstance(token, str)
             or not token
             or not isinstance(attempt, dict)
+            or (resume_thread_id is not None and not isinstance(resume_thread_id, str))
+            or not isinstance(continuation_turn_count, int)
+            or continuation_turn_count < 0
         ):
-            raise TrackerError("claim response is missing work_item, claim_token, or attempt")
-        return ClaimLease(item=claimed, token=token, attempt=attempt)
+            raise TrackerError(
+                "claim response is missing work_item, claim_token, or attempt"
+            )
+        return ClaimLease(
+            item=claimed,
+            token=token,
+            attempt=attempt,
+            resume_thread_id=resume_thread_id,
+            continuation_turn_count=continuation_turn_count,
+        )
 
     async def heartbeat(self, lease: ClaimLease) -> dict[str, Any]:
         self._require_active(lease)
@@ -152,16 +172,20 @@ class ControlPlaneTracker:
         reason: str,
         *,
         retry_delay_seconds: int,
+        thread_id: str | None = None,
     ) -> dict[str, Any]:
         self._require_active(lease)
+        body: dict[str, Any] = {
+            "claimToken": lease.token,
+            "reason": reason,
+            "retryDelaySeconds": retry_delay_seconds,
+        }
+        if thread_id is not None:
+            body["threadId"] = thread_id
         item = await self._request(
             "POST",
             self._item_path(lease.id) + "/release",
-            json={
-                "claimToken": lease.token,
-                "reason": reason,
-                "retryDelaySeconds": retry_delay_seconds,
-            },
+            json=body,
         )
         lease.active = False
         if not isinstance(item, dict):
@@ -247,9 +271,16 @@ class ControlPlaneTracker:
         lease: ClaimLease,
         name: str | None,
         arguments: Any,
+        *,
+        thread_id: str | None = None,
     ) -> ToolExecution:
         try:
-            body, stop = await self._execute_tool(lease, name, arguments)
+            body, stop = await self._execute_tool(
+                lease,
+                name,
+                arguments,
+                thread_id=thread_id,
+            )
             return ToolExecution(_tool_response(True, body), stop_agent=stop)
         except (TrackerError, ValueError) as error:
             return ToolExecution(_tool_response(False, {"error": str(error)}))
@@ -278,6 +309,8 @@ class ControlPlaneTracker:
         lease: ClaimLease,
         name: str | None,
         arguments: Any,
+        *,
+        thread_id: str | None,
     ) -> tuple[Any, bool]:
         if not isinstance(arguments, dict):
             raise ValueError("tool arguments must be an object")
@@ -306,7 +339,9 @@ class ControlPlaneTracker:
         if name == "work_item_add_artifact":
             path = _required_string(arguments, "path")
             if not _valid_artifact_path(path):
-                raise ValueError("artifact path must be a safe repository-relative path")
+                raise ValueError(
+                    "artifact path must be a safe repository-relative path"
+                )
             direction = arguments.get("direction")
             if direction not in {"input", "output"}:
                 raise ValueError("artifact direction must be input or output")
@@ -350,7 +385,7 @@ class ControlPlaneTracker:
                 lease,
                 "stage_review",
                 "agent_completed",
-                {},
+                _thread_payload({}, thread_id),
             )
             return body, True
         if name == "work_item_block":
@@ -362,7 +397,10 @@ class ControlPlaneTracker:
                 lease,
                 "blocked",
                 "work_item_blocked",
-                {"blocker": {"code": code, "message": message}},
+                _thread_payload(
+                    {"blocker": {"code": code, "message": message}},
+                    thread_id,
+                ),
             )
             return body, True
         supported = ", ".join(spec["name"] for spec in self.tool_specs())
@@ -441,6 +479,12 @@ def _required_string(arguments: dict[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{key} must be a non-empty string")
     return value.strip()
+
+
+def _thread_payload(payload: dict[str, Any], thread_id: str | None) -> dict[str, Any]:
+    if thread_id is None:
+        return payload
+    return {**payload, "thread_id": thread_id}
 
 
 def _valid_artifact_path(value: str) -> bool:

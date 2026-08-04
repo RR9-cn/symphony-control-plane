@@ -78,8 +78,13 @@ Profile 在 Claim 前解析。没有唯一匹配项的 WorkItem 会进入 `Block
 ```text
 profile_name / profile_version / agent_role
 prompt_file / prompt_hash / skills / model
-sandbox / network_access / max_concurrent_agents / max_turns
+effort / sandbox / network_access / max_concurrent_agents / max_turns
 ```
+
+未配置 `agent_profiles.<name>.sandbox` 时，Profile 默认使用
+`danger-full-access`；未配置 `codex.thread_sandbox` 或
+`codex.turn_sandbox_policy` 时也默认使用完全访问。需要收紧角色权限时，应在
+Profile 中显式设置 `workspace-write` 或 `read-only`，Profile 配置优先于全局默认值。
 
 同一 Profile 名称和版本若出现不同快照会作为配置冲突阻断执行，配置变更必须递增版本。可通过以下接口还原执行历史：
 
@@ -87,6 +92,12 @@ sandbox / network_access / max_concurrent_agents / max_turns
 GET /api/agent-profiles
 GET /api/work-items/{id}/attempts
 ```
+
+当 Codex Turn 已结束但 WorkItem 尚未生成 Handoff 时，Runner 会把 `thread_id`
+写入当前 `agent_attempts`。下一次 Claim 在 Profile 名称和版本一致时返回该线程，
+Runner 使用 `thread/resume` 继续同一个上下文，因此子 Agent 的已完成结果不会因
+`--once` 进程退出而丢失。`StageReview -> Rework -> Ready` 同样续接原线程；最大
+Turn 数按 SQLite 中同线程的历史 Attempt 计算，不依赖单个 Runner 进程内存。
 
 ## Skill 仓库与版本固定
 

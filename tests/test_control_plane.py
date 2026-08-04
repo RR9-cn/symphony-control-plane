@@ -76,7 +76,13 @@ async def test_dependencies_gate_candidates_and_status_events(api) -> None:
         event["event_type"]
         for event in (await api.get("/api/work-items/WI-001/events")).json()
     ]
-    assert event_types == ["created", "claimed", "artifact_created", "agent_completed", "stage_approved"]
+    assert event_types == [
+        "created",
+        "claimed",
+        "artifact_created",
+        "agent_completed",
+        "stage_approved",
+    ]
     dependent_events = (await api.get("/api/work-items/WI-002/events")).json()
     assert "dependency_satisfied" in [event["event_type"] for event in dependent_events]
 
@@ -95,16 +101,54 @@ async def test_concurrent_claim_allows_exactly_one_winner(api) -> None:
     winner = next(response for response in responses if response.status_code == 200)
     item = (await api.get("/api/work-items/WI-001")).json()
     assert item["status"] == "running"
-    assert item["claim"]["worker_id"] == winner.json()["work_item"]["claim"]["worker_id"]
+    assert (
+        item["claim"]["worker_id"] == winner.json()["work_item"]["claim"]["worker_id"]
+    )
     events = (await api.get("/api/work-items/WI-001/events")).json()
     assert [event["event_type"] for event in events].count("claimed") == 1
+
+
+async def test_feature_root_handoff_satisfies_completion_guard(api) -> None:
+    await create_fixture(api, work_item_payload("WI-001", status="ready"))
+    claim = await api.post(
+        "/api/work-items/WI-001/claim",
+        json={"workerId": "symphony-01", "expectedVersion": 1, "leaseSeconds": 60},
+    )
+    token = claim.json()["claim_token"]
+    artifact = await api.post(
+        "/api/work-items/WI-001/artifacts",
+        json={
+            "direction": "output",
+            "path": (
+                "docs/iterations/2026-08-user-detail-pilot/"
+                "orchestration/handoffs/WI-001.yaml"
+            ),
+            "revision": "abc1234",
+            "claim_token": token,
+        },
+    )
+    assert artifact.status_code == 201, artifact.text
+
+    completed = await api.post(
+        "/api/work-items/WI-001/status",
+        json={
+            "to_status": "stage_review",
+            "event": "agent_completed",
+            "claim_token": token,
+        },
+    )
+    assert completed.status_code == 200, completed.text
 
 
 async def test_worker_release_uses_requested_retry_delay(api) -> None:
     await create_fixture(api, work_item_payload("WI-001", status="ready"))
     claimed = await api.post(
         "/api/work-items/WI-001/claim",
-        json={"worker_id": "windows-runner", "expected_version": 1, "lease_seconds": 60},
+        json={
+            "worker_id": "windows-runner",
+            "expected_version": 1,
+            "lease_seconds": 60,
+        },
     )
     token = claimed.json()["claim_token"]
     released = await api.post(
@@ -113,13 +157,88 @@ async def test_worker_release_uses_requested_retry_delay(api) -> None:
             "claim_token": token,
             "reason": "agent_attempt_failed",
             "retry_delay_seconds": 0,
+            "thread_id": "thread-resumable",
         },
     )
     assert released.status_code == 200, released.text
     assert released.json()["status"] == "retry_queued"
+    attempts = (await api.get("/api/work-items/WI-001/attempts")).json()
+    assert attempts[0]["thread_id"] == "thread-resumable"
     tick = await api.post("/api/maintenance/tick")
     assert tick.status_code == 200, tick.text
     assert (await api.get("/api/work-items/WI-001")).json()["status"] == "ready"
+
+
+async def test_stage_rework_claim_resumes_completed_codex_thread(api) -> None:
+    await create_fixture(api, work_item_payload("WI-001", status="ready"))
+    profile = {
+        "name": "solution_architect",
+        "version": 1,
+        "config": {
+            "profile_name": "solution_architect",
+            "profile_version": 1,
+        },
+    }
+    claimed = await api.post(
+        "/api/work-items/WI-001/claim",
+        json={
+            "worker_id": "windows-runner",
+            "expected_version": 1,
+            "lease_seconds": 60,
+            "profile": profile,
+        },
+    )
+    token = claimed.json()["claim_token"]
+    await api.post(
+        "/api/work-items/WI-001/artifacts",
+        json={
+            "direction": "output",
+            "path": "orchestration/handoffs/WI-001.yaml",
+            "revision": "reviewed",
+            "claim_token": token,
+        },
+    )
+    delivered = await api.post(
+        "/api/work-items/WI-001/status",
+        json={
+            "to_status": "stage_review",
+            "event": "agent_completed",
+            "claim_token": token,
+            "payload": {"thread_id": "thread-rework"},
+        },
+    )
+    assert delivered.status_code == 200, delivered.text
+    rejected = await api.post(
+        "/api/work-items/WI-001/status",
+        json={
+            "to_status": "rework",
+            "event": "stage_rejected",
+            "actor_type": "human",
+            "payload": {"rework_reason": "fix handoff metadata"},
+        },
+    )
+    queued = await api.post(
+        "/api/work-items/WI-001/status",
+        json={
+            "to_status": "ready",
+            "event": "rework_queued",
+            "actor_type": "control_plane",
+            "payload": {"rework_scope": "handoff only"},
+        },
+    )
+    reclaimed = await api.post(
+        "/api/work-items/WI-001/claim",
+        json={
+            "worker_id": "windows-runner",
+            "expected_version": queued.json()["version"],
+            "lease_seconds": 60,
+            "profile": profile,
+        },
+    )
+    assert rejected.status_code == 200, rejected.text
+    assert reclaimed.status_code == 200, reclaimed.text
+    assert reclaimed.json()["resume_thread_id"] == "thread-rework"
+    assert reclaimed.json()["continuation_turn_count"] == 0
 
 
 async def test_expired_lease_is_retried_and_old_token_is_revoked(api) -> None:
@@ -214,7 +333,9 @@ async def test_human_decision_releases_claim_and_resumes_ready(api) -> None:
     assert event_types[-2:] == ["human_input_requested", "human_decision_resolved"]
 
 
-async def test_stage_review_can_request_human_and_dependency_cycles_are_rejected(api) -> None:
+async def test_stage_review_can_request_human_and_dependency_cycles_are_rejected(
+    api,
+) -> None:
     await create_fixture(
         api,
         work_item_payload("WI-001"),

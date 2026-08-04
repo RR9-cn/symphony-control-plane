@@ -65,23 +65,16 @@ class AgentConfig:
 @dataclass(frozen=True)
 class CodexConfig:
     command: str = "codex app-server"
-    approval_policy: str | dict[str, Any] = field(
-        default_factory=lambda: {
-            "reject": {
-                "sandbox_approval": True,
-                "rules": True,
-                "mcp_elicitations": True,
-            }
-        }
-    )
-    thread_sandbox: str = "workspace-write"
+    approval_policy: str | dict[str, Any] = "never"
+    thread_sandbox: str = "danger-full-access"
     turn_sandbox_policy: dict[str, Any] = field(
-        default_factory=lambda: {"type": "workspaceWrite", "networkAccess": False}
+        default_factory=lambda: {"type": "dangerFullAccess"}
     )
     turn_timeout_ms: int = 3_600_000
     read_timeout_ms: int = 5_000
     stall_timeout_ms: int = 300_000
     model: str | None = None
+    effort: str | None = None
     allowed_skills: tuple[str, ...] = ()
     isolate_user_home: bool = True
 
@@ -99,6 +92,7 @@ class AgentProfileConfig:
     max_concurrent_agents: int
     max_turns: int
     model: str | None = None
+    effort: str | None = None
 
     @property
     def prompt_hash(self) -> str:
@@ -113,6 +107,7 @@ class AgentProfileConfig:
             "prompt_hash": self.prompt_hash,
             "skills": list(self.skills),
             "model": self.model,
+            "effort": self.effort,
             "sandbox": self.sandbox,
             "network_access": self.network_access,
             "max_concurrent_agents": self.max_concurrent_agents,
@@ -142,6 +137,7 @@ class AgentProfileConfig:
             thread_sandbox=self.sandbox,
             turn_sandbox_policy=turn_policy,
             model=self.model or base.model,
+            effort=self.effort or base.effort,
             allowed_skills=self.skills,
         )
 
@@ -158,15 +154,19 @@ class AgentProfileConfig:
             "inside the Codex session."
         )
         try:
-            rendered = Environment(undefined=StrictUndefined).from_string(
-                self.prompt_template
-            ).render(
-                issue=issue,
-                attempt=attempt,
-                profile=self.snapshot(),
+            rendered = (
+                Environment(undefined=StrictUndefined)
+                .from_string(self.prompt_template)
+                .render(
+                    issue=issue,
+                    attempt=attempt,
+                    profile=self.snapshot(),
+                )
             )
         except LiquidError as error:
-            raise WorkflowError(f"prompt rendering failed for profile {self.name}: {error}") from error
+            raise WorkflowError(
+                f"prompt rendering failed for profile {self.name}: {error}"
+            ) from error
         return f"{policy}\n\n{rendered.strip()}".strip()
 
 
@@ -184,7 +184,9 @@ class Workflow:
 
     def profile_for(self, issue: dict[str, Any]) -> AgentProfileConfig:
         role = issue.get("agent_role")
-        matches = [profile for profile in self.agent_profiles if profile.agent_role == role]
+        matches = [
+            profile for profile in self.agent_profiles if profile.agent_role == role
+        ]
         if not matches:
             raise WorkflowError(f"no agent profile matches agent_role {role!r}")
         if len(matches) != 1:
@@ -219,7 +221,9 @@ def load_workflow(path: str | Path) -> Workflow:
         os.getenv("SYMPHONY_WORKER_ID"),
     )
     worker_id = worker_value or f"windows-{socket.gethostname()}-{os.getpid()}"
-    lease_seconds = _bounded_int(provider.get("lease_seconds", 300), 10, 3600, "lease_seconds")
+    lease_seconds = _bounded_int(
+        provider.get("lease_seconds", 300), 10, 3600, "lease_seconds"
+    )
     request_timeout = _positive_number(
         provider.get("request_timeout_seconds", 30),
         "request_timeout_seconds",
@@ -236,11 +240,17 @@ def load_workflow(path: str | Path) -> Workflow:
 
     hooks_data = _mapping(front_matter.get("hooks"), "hooks")
     hooks = HookConfig(
-        after_create=_optional_string(hooks_data.get("after_create"), "hooks.after_create"),
+        after_create=_optional_string(
+            hooks_data.get("after_create"), "hooks.after_create"
+        ),
         before_run=_optional_string(hooks_data.get("before_run"), "hooks.before_run"),
         after_run=_optional_string(hooks_data.get("after_run"), "hooks.after_run"),
-        before_remove=_optional_string(hooks_data.get("before_remove"), "hooks.before_remove"),
-        timeout_ms=_bounded_int(hooks_data.get("timeout_ms", 60_000), 1, 3_600_000, "hooks.timeout_ms"),
+        before_remove=_optional_string(
+            hooks_data.get("before_remove"), "hooks.before_remove"
+        ),
+        timeout_ms=_bounded_int(
+            hooks_data.get("timeout_ms", 60_000), 1, 3_600_000, "hooks.timeout_ms"
+        ),
     )
 
     polling_data = _mapping(front_matter.get("polling"), "polling")
@@ -271,24 +281,15 @@ def load_workflow(path: str | Path) -> Workflow:
     command = codex_data.get("command", "codex app-server")
     if not isinstance(command, str) or not command.strip():
         raise WorkflowError("codex.command must be a non-empty string")
-    approval_policy = codex_data.get(
-        "approval_policy",
-        {
-            "reject": {
-                "sandbox_approval": True,
-                "rules": True,
-                "mcp_elicitations": True,
-            }
-        },
-    )
+    approval_policy = codex_data.get("approval_policy", "never")
     if not isinstance(approval_policy, (str, dict)):
         raise WorkflowError("codex.approval_policy must be a string or object")
-    thread_sandbox = codex_data.get("thread_sandbox", "workspace-write")
+    thread_sandbox = codex_data.get("thread_sandbox", "danger-full-access")
     if thread_sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
         raise WorkflowError("invalid codex.thread_sandbox")
     turn_policy = codex_data.get(
         "turn_sandbox_policy",
-        {"type": "workspaceWrite", "networkAccess": False},
+        {"type": "dangerFullAccess"},
     )
     if not isinstance(turn_policy, dict):
         raise WorkflowError("codex.turn_sandbox_policy must be an object")
@@ -316,6 +317,7 @@ def load_workflow(path: str | Path) -> Workflow:
             "codex.stall_timeout_ms",
         ),
         model=_optional_string(codex_data.get("model"), "codex.model"),
+        effort=_optional_string(codex_data.get("effort"), "codex.effort"),
         isolate_user_home=_boolean(
             codex_data.get("isolate_user_home", True), "codex.isolate_user_home"
         ),
@@ -364,7 +366,9 @@ def _load_skill_repository(value: Any, base: Path) -> SkillRepositoryConfig:
     url = _validated_git_source(raw_url, base)
     revision, _revision_env = _resolve_value(data.get("revision"), None)
     if revision is None or not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
-        raise WorkflowError("skill_repository.revision must be a full 40-character commit SHA")
+        raise WorkflowError(
+            "skill_repository.revision must be a full 40-character commit SHA"
+        )
     skills_path = _safe_posix_directory(
         data.get("skills_path", "skills"), "skill_repository.skills_path"
     )
@@ -408,7 +412,9 @@ def _load_agent_profiles(
             match.get("agent_role"), f"agent_profiles.{name}.match.agent_role"
         )
         if agent_role in roles:
-            raise WorkflowError(f"multiple agent profiles match agent_role {agent_role!r}")
+            raise WorkflowError(
+                f"multiple agent profiles match agent_role {agent_role!r}"
+            )
         roles.add(agent_role)
 
         prompt_path = _safe_relative_file(
@@ -419,7 +425,9 @@ def _load_agent_profiles(
         try:
             profile_prompt = prompt_path.read_text(encoding="utf-8")
         except OSError as error:
-            raise WorkflowError(f"cannot read profile prompt file: {prompt_path}") from error
+            raise WorkflowError(
+                f"cannot read profile prompt file: {prompt_path}"
+            ) from error
         combined_prompt = "\n\n".join(
             part.strip() for part in (profile_prompt, global_prompt) if part.strip()
         )
@@ -428,14 +436,17 @@ def _load_agent_profiles(
 
         raw_skills = profile_data.get("skills", [])
         if not isinstance(raw_skills, list) or not all(
-            isinstance(skill, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", skill)
+            isinstance(skill, str)
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", skill)
             for skill in raw_skills
         ):
-            raise WorkflowError(f"agent_profiles.{name}.skills must be a list of skill names")
+            raise WorkflowError(
+                f"agent_profiles.{name}.skills must be a list of skill names"
+            )
         if len(set(raw_skills)) != len(raw_skills):
             raise WorkflowError(f"agent_profiles.{name}.skills must be unique")
 
-        sandbox = profile_data.get("sandbox", "workspace-write")
+        sandbox = profile_data.get("sandbox", "danger-full-access")
         if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
             raise WorkflowError(f"invalid agent_profiles.{name}.sandbox")
         network_access = profile_data.get("network_access", False)
@@ -474,6 +485,9 @@ def _load_agent_profiles(
                 ),
                 model=_optional_string(
                     profile_data.get("model"), f"agent_profiles.{name}.model"
+                ),
+                effort=_optional_string(
+                    profile_data.get("effort"), f"agent_profiles.{name}.effort"
                 ),
             )
         )
@@ -548,13 +562,21 @@ def _validated_endpoint(value: str, allow_insecure_http: bool) -> str:
     loopback = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
     if parsed.scheme == "https" and parsed.hostname:
         return endpoint
-    if parsed.scheme == "http" and parsed.hostname and (loopback or allow_insecure_http):
+    if (
+        parsed.scheme == "http"
+        and parsed.hostname
+        and (loopback or allow_insecure_http)
+    ):
         return endpoint
     raise WorkflowError("tracker endpoint must use HTTPS or explicit loopback HTTP")
 
 
 def _bounded_int(value: Any, minimum: int, maximum: int, field_name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not minimum <= value <= maximum
+    ):
         raise WorkflowError(f"{field_name} must be between {minimum} and {maximum}")
     return value
 
@@ -617,7 +639,9 @@ def _validated_git_source(value: str, base: Path) -> str:
         if parsed.scheme not in {"https", "ssh", "git", "file"}:
             raise WorkflowError("skill_repository.url has an unsupported scheme")
         if parsed.password or parsed.query or parsed.fragment:
-            raise WorkflowError("skill_repository.url must not embed credentials or query data")
+            raise WorkflowError(
+                "skill_repository.url must not embed credentials or query data"
+            )
         return source
     if re.fullmatch(r"[^@\s]+@[^:\s]+:.+", source):
         return source
@@ -636,5 +660,7 @@ def _safe_posix_directory(value: Any, field_name: str) -> str:
         raise WorkflowError(f"{field_name} must use forward slashes")
     path = PurePosixPath(raw)
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-        raise WorkflowError(f"{field_name} must be a safe repository-relative directory")
+        raise WorkflowError(
+            f"{field_name} must be a safe repository-relative directory"
+        )
     return path.as_posix()

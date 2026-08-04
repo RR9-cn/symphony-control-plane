@@ -36,8 +36,8 @@ def main() -> int:
     if "CONTROL_PLANE_TOKEN" in os.environ or "ACP_API_TOKEN" in os.environ:
         return 88
     assert Path(os.environ["HOME"]).resolve().is_relative_to(Path.cwd().resolve())
-    assert Path(os.environ["USERPROFILE"]).resolve().is_relative_to(
-        Path.cwd().resolve()
+    assert (
+        Path(os.environ["USERPROFILE"]).resolve().is_relative_to(Path.cwd().resolve())
     )
     installed_skills = Path.cwd() / ".agents" / "skills"
     assert sorted(path.name for path in installed_skills.iterdir()) == [
@@ -82,21 +82,29 @@ def main() -> int:
         }
     )
 
+    mode = os.getenv("FAKE_CODEX_MODE")
+    state_path = (
+        Path(os.environ["FAKE_CODEX_STATE_FILE"]) if mode == "continuation" else None
+    )
+    is_resumed = state_path is not None and state_path.exists()
     thread = read_message()
-    assert thread["method"] == "thread/start"
-    tools = thread["params"]["dynamicTools"]
+    assert thread["method"] == ("thread/resume" if is_resumed else "thread/start")
     assert thread["params"]["sandbox"] == "workspace-write"
-    assert [tool["name"] for tool in tools] == [
-        "work_item_get",
-        "work_item_add_event",
-        "work_item_add_artifact",
-        "work_item_request_human",
-        "work_item_complete",
-        "work_item_block",
-    ]
-    encoded_tools = json.dumps(tools)
-    assert "claim_token" not in encoded_tools
-    assert "work_item_id" not in encoded_tools
+    if is_resumed:
+        assert thread["params"]["threadId"] == "thread-test"
+    else:
+        tools = thread["params"]["dynamicTools"]
+        assert [tool["name"] for tool in tools] == [
+            "work_item_get",
+            "work_item_add_event",
+            "work_item_add_artifact",
+            "work_item_request_human",
+            "work_item_complete",
+            "work_item_block",
+        ]
+        encoded_tools = json.dumps(tools)
+        assert "claim_token" not in encoded_tools
+        assert "work_item_id" not in encoded_tools
     send({"id": thread["id"], "result": {"thread": {"id": "thread-test"}}})
 
     turn = read_message()
@@ -104,13 +112,26 @@ def main() -> int:
     assert "WI-001" in turn["params"]["input"][0]["text"]
     assert "Agent profile: solution_architect v1" in turn["params"]["input"][0]["text"]
     assert "fskill-analysis-tech" in turn["params"]["input"][0]["text"]
+    if is_resumed:
+        assert "Continue the existing WorkItem" in turn["params"]["input"][0]["text"]
     assert turn["params"]["sandboxPolicy"] == {
         "type": "workspaceWrite",
         "networkAccess": False,
     }
     send({"id": turn["id"], "result": {"turn": {"id": "turn-test"}}})
 
-    if os.getenv("FAKE_CODEX_MODE") == "fail":
+    if mode == "continuation" and not is_resumed:
+        assert state_path is not None
+        state_path.write_text("resume", encoding="utf-8")
+        send(
+            {
+                "method": "turn/completed",
+                "params": {"turn": {"id": "turn-test"}},
+            }
+        )
+        return 0
+
+    if mode == "fail":
         send(
             {
                 "method": "turn/failed",
@@ -119,7 +140,7 @@ def main() -> int:
         )
         return 0
 
-    if os.getenv("FAKE_CODEX_MODE") == "human":
+    if mode == "human":
         call_tool(
             10,
             "work_item_request_human",

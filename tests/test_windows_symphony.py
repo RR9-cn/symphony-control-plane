@@ -85,7 +85,8 @@ def write_workflow(path: Path, command: str, *, include_backend: bool = False) -
         "Build WorkItem {{ issue.identifier }}: {{ issue.title }}.",
         encoding="utf-8",
     )
-    backend_profile = """
+    backend_profile = (
+        """
   backend_builder:
     version: 2
     match:
@@ -97,7 +98,10 @@ def write_workflow(path: Path, command: str, *, include_backend: bool = False) -
     network_access: true
     max_concurrent_agents: 1
     max_turns: 20
-""" if include_backend else ""
+"""
+        if include_backend
+        else ""
+    )
     workflow = path / "WORKFLOW.md"
     workflow.write_text(
         f"""---
@@ -197,14 +201,14 @@ async def test_windows_runner_drives_codex_and_completes_work_item(
         "artifact_created",
         "agent_completed",
     ]
-    profiles = (await authenticated_api.get("/api/agent-profiles", headers=headers)).json()
+    profiles = (
+        await authenticated_api.get("/api/agent-profiles", headers=headers)
+    ).json()
     assert len(profiles) == 1
     assert profiles[0]["name"] == "solution_architect"
     assert profiles[0]["version"] == 1
     attempts = (
-        await authenticated_api.get(
-            "/api/work-items/WI-001/attempts", headers=headers
-        )
+        await authenticated_api.get("/api/work-items/WI-001/attempts", headers=headers)
     ).json()
     assert len(attempts) == 1
     assert attempts[0]["status"] == "stage_review"
@@ -226,7 +230,9 @@ async def test_bound_block_tool_releases_claim(
     headers = {"Authorization": "Bearer integration-secret"}
     monkeypatch.setenv("CONTROL_PLANE_TOKEN", "integration-secret")
     workflow = load_workflow(write_workflow(tmp_path, "codex app-server"))
-    await authenticated_api.post("/api/features", json=feature_payload(), headers=headers)
+    await authenticated_api.post(
+        "/api/features", json=feature_payload(), headers=headers
+    )
     await authenticated_api.post(
         "/api/work-items",
         json=work_item_payload("WI-001", status="ready"),
@@ -242,7 +248,10 @@ async def test_bound_block_tool_releases_claim(
         result = await tracker.execute_tool(
             lease,
             "work_item_block",
-            {"code": "missing_dependency", "message": "Required service is unavailable."},
+            {
+                "code": "missing_dependency",
+                "message": "Required service is unavailable.",
+            },
         )
     finally:
         await tracker.close()
@@ -268,7 +277,9 @@ async def test_codex_failure_releases_claim_to_retry_queue(
     fake_server = Path(__file__).with_name("fake_codex_app_server.py")
     command = subprocess.list2cmdline([sys.executable, str(fake_server)])
     workflow = load_workflow(write_workflow(tmp_path, command))
-    await authenticated_api.post("/api/features", json=feature_payload(), headers=headers)
+    await authenticated_api.post(
+        "/api/features", json=feature_payload(), headers=headers
+    )
     await authenticated_api.post(
         "/api/work-items",
         json=work_item_payload("WI-001", status="ready"),
@@ -294,6 +305,66 @@ async def test_codex_failure_releases_claim_to_retry_queue(
     assert item["claim"] == {"worker_id": None, "expires_at": None}
 
 
+async def test_codex_continuation_resumes_thread_across_runner_processes(
+    authenticated_api,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = {"Authorization": "Bearer integration-secret"}
+    monkeypatch.setenv("CONTROL_PLANE_TOKEN", "integration-secret")
+    monkeypatch.setenv("FAKE_CODEX_MODE", "continuation")
+    monkeypatch.setenv("FAKE_CODEX_STATE_FILE", str(tmp_path / "codex-state"))
+    fake_server = Path(__file__).with_name("fake_codex_app_server.py")
+    command = subprocess.list2cmdline([sys.executable, str(fake_server)])
+    workflow = load_workflow(write_workflow(tmp_path, command))
+    await authenticated_api.post(
+        "/api/features", json=feature_payload(), headers=headers
+    )
+    await authenticated_api.post(
+        "/api/work-items",
+        json=work_item_payload("WI-001", status="ready"),
+        headers=headers,
+    )
+
+    first_tracker = ControlPlaneTracker(
+        workflow.tracker,
+        transport=httpx.ASGITransport(app=authenticated_api.app),
+    )
+    try:
+        async with WindowsSymphony(workflow, tracker=first_tracker) as orchestrator:
+            first = await orchestrator.run_once()
+    finally:
+        await first_tracker.close()
+    assert first[0].status == "continuation_queued"
+    attempts = (
+        await authenticated_api.get("/api/work-items/WI-001/attempts", headers=headers)
+    ).json()
+    assert attempts[0]["thread_id"] == "thread-test"
+
+    await asyncio.sleep(1.1)
+    await authenticated_api.post("/api/maintenance/tick", json={}, headers=headers)
+    second_tracker = ControlPlaneTracker(
+        workflow.tracker,
+        transport=httpx.ASGITransport(app=authenticated_api.app),
+    )
+    try:
+        async with WindowsSymphony(workflow, tracker=second_tracker) as orchestrator:
+            second = await orchestrator.run_once()
+    finally:
+        await second_tracker.close()
+
+    assert second[0].status == "work_item_released"
+    item = (
+        await authenticated_api.get("/api/work-items/WI-001", headers=headers)
+    ).json()
+    assert item["status"] == "stage_review"
+    attempts = (
+        await authenticated_api.get("/api/work-items/WI-001/attempts", headers=headers)
+    ).json()
+    assert [attempt["attempt_number"] for attempt in attempts] == [1, 2]
+    assert attempts[0]["thread_id"] == "thread-test"
+
+
 async def test_skill_human_confirmation_exits_and_resumes_ready(
     authenticated_api,
     tmp_path: Path,
@@ -305,7 +376,9 @@ async def test_skill_human_confirmation_exits_and_resumes_ready(
     fake_server = Path(__file__).with_name("fake_codex_app_server.py")
     command = subprocess.list2cmdline([sys.executable, str(fake_server)])
     workflow = load_workflow(write_workflow(tmp_path, command))
-    await authenticated_api.post("/api/features", json=feature_payload(), headers=headers)
+    await authenticated_api.post(
+        "/api/features", json=feature_payload(), headers=headers
+    )
     await authenticated_api.post(
         "/api/work-items",
         json=work_item_payload("WI-001", status="ready"),
@@ -328,9 +401,7 @@ async def test_skill_human_confirmation_exits_and_resumes_ready(
     assert item["status"] == "needs_human"
     assert item["claim"] == {"worker_id": None, "expires_at": None}
     decisions = (
-        await authenticated_api.get(
-            "/api/work-items/WI-001/decisions", headers=headers
-        )
+        await authenticated_api.get("/api/work-items/WI-001/decisions", headers=headers)
     ).json()
     assert len(decisions) == 1
     assert decisions[0]["status"] == "open"
@@ -350,9 +421,7 @@ async def test_skill_human_confirmation_exits_and_resumes_ready(
     ).json()
     assert resumed["status"] == "ready"
     attempts = (
-        await authenticated_api.get(
-            "/api/work-items/WI-001/attempts", headers=headers
-        )
+        await authenticated_api.get("/api/work-items/WI-001/attempts", headers=headers)
     ).json()
     assert attempts[0]["status"] == "needs_human"
 
@@ -365,7 +434,9 @@ async def test_missing_profile_is_blocked_without_builder_fallback(
     headers = {"Authorization": "Bearer integration-secret"}
     monkeypatch.setenv("CONTROL_PLANE_TOKEN", "integration-secret")
     workflow = load_workflow(write_workflow(tmp_path, "codex app-server"))
-    await authenticated_api.post("/api/features", json=feature_payload(), headers=headers)
+    await authenticated_api.post(
+        "/api/features", json=feature_payload(), headers=headers
+    )
     await authenticated_api.post(
         "/api/work-items",
         json=work_item_payload("WI-002", status="ready"),
@@ -389,9 +460,7 @@ async def test_missing_profile_is_blocked_without_builder_fallback(
     assert item["status"] == "blocked"
     assert item["blocker"]["code"] == "agent_profile_configuration_error"
     attempts = (
-        await authenticated_api.get(
-            "/api/work-items/WI-002/attempts", headers=headers
-        )
+        await authenticated_api.get("/api/work-items/WI-002/attempts", headers=headers)
     ).json()
     assert attempts[0]["profile_snapshot"] == {}
 
@@ -412,7 +481,9 @@ async def test_profile_concurrency_is_enforced_before_claim(
             "title": item_id,
             "description": "profile concurrency fixture",
             "agent_role": role,
-            "stage": "tech_analysis" if role == "solution_architect" else "implementation",
+            "stage": "tech_analysis"
+            if role == "solution_architect"
+            else "implementation",
             "status": "ready",
             "version": 1,
             "priority": 1,
@@ -474,7 +545,10 @@ async def test_profile_concurrency_is_enforced_before_claim(
     ) as orchestrator:
         dispatched = await orchestrator.tick()
         assert dispatched == ["WI-001", "WI-002"]
-        assert [item_id for item_id, _profile in tracker.claimed] == ["WI-001", "WI-002"]
+        assert [item_id for item_id, _profile in tracker.claimed] == [
+            "WI-001",
+            "WI-002",
+        ]
         assert tracker.claimed[0][1]["name"] == "solution_architect"  # type: ignore[index]
         assert tracker.claimed[1][1]["name"] == "backend_builder"  # type: ignore[index]
 
@@ -486,11 +560,7 @@ async def test_skill_allowlist_uses_pinned_revision_not_live_checkout(
     monkeypatch.setenv("CONTROL_PLANE_TOKEN", "integration-secret")
     workflow = load_workflow(write_workflow(tmp_path, "codex app-server"))
     live_instruction = (
-        tmp_path
-        / "skill-repository"
-        / "skills"
-        / "fskill-analysis-tech"
-        / "SKILL.md"
+        tmp_path / "skill-repository" / "skills" / "fskill-analysis-tech" / "SKILL.md"
     )
     live_instruction.write_text(
         live_instruction.read_text(encoding="utf-8") + "\nUNPINNED LIVE CHANGE\n",
@@ -529,11 +599,11 @@ async def test_missing_or_incompatible_skill_fails_before_claim(
             missing.skill_repository, missing.agent_profiles
         ).initialize()
 
-    valid = load_workflow(write_workflow(tmp_path / "invalid-reference", "codex app-server"))
-    repository = tmp_path / "invalid-reference" / "skill-repository"
-    instruction = (
-        repository / "skills" / "fskill-analysis-tech" / "SKILL.md"
+    valid = load_workflow(
+        write_workflow(tmp_path / "invalid-reference", "codex app-server")
     )
+    repository = tmp_path / "invalid-reference" / "skill-repository"
+    instruction = repository / "skills" / "fskill-analysis-tech" / "SKILL.md"
     instruction.write_text(
         instruction.read_text(encoding="utf-8")
         + "\nRead [missing guidance](references/missing.md).\n",
@@ -566,6 +636,9 @@ def test_workflow_is_strict_and_workspace_keys_are_windows_safe(
 ) -> None:
     monkeypatch.setenv("CONTROL_PLANE_TOKEN", "integration-secret")
     workflow = load_workflow(write_workflow(tmp_path, "codex app-server"))
+    assert workflow.codex.approval_policy == "never"
+    assert workflow.codex.thread_sandbox == "danger-full-access"
+    assert workflow.codex.turn_sandbox_policy == {"type": "dangerFullAccess"}
     with pytest.raises(WorkflowError, match="prompt rendering failed"):
         replace(
             workflow.agent_profiles[0], prompt_template="{{ issue.unknown }}"
@@ -583,6 +656,19 @@ def test_workflow_is_strict_and_workspace_keys_are_windows_safe(
     reviewer_codex = reviewer.codex_config(workflow.codex)
     assert reviewer_codex.thread_sandbox == "read-only"
     assert reviewer_codex.turn_sandbox_policy == {"type": "readOnly"}
+
+    workflow_path = workflow.path
+    workflow_path.write_text(
+        workflow_path.read_text(encoding="utf-8").replace(
+            "    sandbox: workspace-write\n", ""
+        ),
+        encoding="utf-8",
+    )
+    defaulted = load_workflow(workflow_path)
+    assert defaulted.agent_profiles[0].sandbox == "danger-full-access"
+    defaulted_codex = defaulted.agent_profiles[0].codex_config(defaulted.codex)
+    assert defaulted_codex.thread_sandbox == "danger-full-access"
+    assert defaulted_codex.turn_sandbox_policy == {"type": "dangerFullAccess"}
 
     assert workspace_key("WI-001") == "WI-001"
     assert workspace_key("CON").startswith("CON-")
