@@ -119,6 +119,25 @@ def main() -> int:
         "networkAccess": False,
     }
     send({"id": turn["id"], "result": {"turn": {"id": "turn-test"}}})
+    send(
+        {
+            "method": "turn/started",
+            "params": {"turn": {"id": "turn-test", "status": "inProgress"}},
+        }
+    )
+    send(
+        {
+            "method": "item/completed",
+            "params": {
+                "item": {
+                    "id": "reasoning-test",
+                    "type": "reasoning",
+                    "status": "completed",
+                    "text": "private reasoning must never be persisted",
+                }
+            },
+        }
+    )
 
     if mode == "continuation" and not is_resumed:
         assert state_path is not None
@@ -150,6 +169,48 @@ def main() -> int:
             },
         )
         return 0
+
+    send(
+        {
+            "method": "item/started",
+            "params": {
+                "item": {
+                    "id": "command-test",
+                    "type": "commandExecution",
+                    "status": "inProgress",
+                    "command": "API_TOKEN='trace-secret' python -m pytest",
+                }
+            },
+        }
+    )
+    send(
+        {
+            "method": "item/completed",
+            "params": {
+                "item": {
+                    "id": "command-test",
+                    "type": "commandExecution",
+                    "status": "completed",
+                    "command": "API_TOKEN='trace-secret' python -m pytest",
+                    "exitCode": 0,
+                    "aggregatedOutput": "1 passed; Authorization: Bearer trace-secret",
+                }
+            },
+        }
+    )
+    send(
+        {
+            "method": "item/completed",
+            "params": {
+                "item": {
+                    "id": "message-test",
+                    "type": "agentMessage",
+                    "status": "completed",
+                    "text": "Implementation and validation are complete.",
+                }
+            },
+        }
+    )
 
     call_tool(10, "work_item_get", {})
     call_tool(

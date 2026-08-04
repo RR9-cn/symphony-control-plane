@@ -981,6 +981,10 @@ Codex 创建 Thread 和 Turn 后立即更新 Attempt 上下文，不能只在 Wo
 - Runner 空闲时仍在线，停止或异常退出后可识别；
 - UI 可启动和优雅停止本机托管 Runner；
 - Thread/Turn 在执行中可见，Needs Human 能关联原 Thread；
+- 每个 Attempt 可展开结构化执行详情，显示 Turn、Agent 消息、命令、工具调用、
+  文件变更、退出码和错误；运行中的详情随看板轮询刷新；
+- 执行事件按 Claim Token 绑定当前 Attempt，敏感字段和常见凭据模式双重脱敏；
+  Reasoning 只记录开始/完成状态，不持久化推理文本；
 - 自动化测试覆盖 Worker 注册、心跳、停止请求、Attempt 上下文和运行态映射；
 - Runner 重启不会重复执行有效 Lease，恢复规则继续遵守正式 `WORKFLOW.md`。
 
@@ -995,8 +999,14 @@ Codex 创建 Thread 和 Turn 后立即更新 Attempt 上下文，不能只在 Wo
   通过 `thread/resume` 延续相同上下文；
 - 新增同机 Runner Supervisor 和启停 API，停止时先请求优雅退出，超时才终止进程；
 - 看板新增 Agent 状态中心、Worker 在线卡片、Runner 启停和执行上下文入口；
+- 新增 `agent_attempt_events` SQLite 表和 Attempt Event API；Runner 把 Codex App
+  Server 结构化事件归一化后实时上报，命令输出采用长度上限，载荷使用字段白名单和
+  服务端二次脱敏；
+- Attempt 卡片支持展开执行时间线，展示命令退出码、工具名称、文件路径和可折叠输出；
+  旧 Attempt 没有事件时显示明确的历史数据提示；
 - 自动化测试覆盖 Worker 生命周期、离线识别、运行态映射、Thread/Turn 写入以及
-  Needs Human 原 Thread 恢复；本地托管 Runner 启动、注册、心跳、停止冒烟验证通过。
+  Needs Human 原 Thread 恢复、事件鉴权/排序/脱敏和 Reasoning 排除；本地托管 Runner
+  启动、注册、心跳、停止冒烟验证通过。
 
 ---
 

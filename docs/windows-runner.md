@@ -242,6 +242,11 @@ fshows-symphony-windows .\WORKFLOW.md
 11. 普通 Turn 结束但未交接时安排 1 秒 continuation；达到 Profile `max_turns` 后阻断，异常按 10 秒指数退避；
 12. 执行 `after_run` Hook，保留工作区供下一次尝试复用。
 
+Codex 执行期间，Runner 会把 App Server 的结构化事件绑定到当前 Attempt：Turn、
+Agent 消息、命令执行、工具调用、文件变更和人工输入请求。事件上报是可观测性旁路，
+短暂失败不会终止 Agent；控制面 UI 可从 Attempt 卡片展开查看。Runner 不上报 Reasoning
+文本，只保留其生命周期，并在发送前对凭据模式脱敏，控制面入库时再次脱敏。
+
 ## 安全边界
 
 - Agent Tool 始终绑定当前 WorkItem，不接受 `work_item_id`；

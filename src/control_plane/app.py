@@ -16,6 +16,8 @@ from control_plane.database import Database
 from control_plane.errors import ControlPlaneError, RepositoryResolutionError
 from control_plane.runner_supervisor import RunnerSupervisor
 from control_plane.schemas import (
+    AgentAttemptEventCreate,
+    AgentAttemptEventView,
     AgentAttemptView,
     AgentRuntimeView,
     AgentProfileView,
@@ -318,6 +320,37 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
         item_id: str, command: AttemptContextUpdate, session: Session
     ) -> AgentAttemptView:
         return await service(session).update_attempt_context(item_id, command)
+
+    @app.post(
+        "/api/work-items/{item_id}/attempts/{attempt_id}/events",
+        response_model=AgentAttemptEventView,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def add_attempt_event(
+        item_id: str,
+        attempt_id: str,
+        command: AgentAttemptEventCreate,
+        session: Session,
+    ) -> AgentAttemptEventView:
+        return await service(session).add_attempt_event(item_id, attempt_id, command)
+
+    @app.get(
+        "/api/work-items/{item_id}/attempts/{attempt_id}/events",
+        response_model=list[AgentAttemptEventView],
+    )
+    async def list_attempt_events(
+        item_id: str,
+        attempt_id: str,
+        session: Session,
+        after_sequence: Annotated[int, Query(ge=0)] = 0,
+        limit: Annotated[int, Query(ge=1, le=1000)] = 500,
+    ) -> list[AgentAttemptEventView]:
+        return await service(session).list_attempt_events(
+            item_id,
+            attempt_id,
+            after_sequence=after_sequence,
+            limit=limit,
+        )
 
     @app.get("/api/work-items/{item_id}", response_model=WorkItemView)
     async def get_work_item(item_id: str, session: Session) -> WorkItemView:

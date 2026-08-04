@@ -610,6 +610,9 @@ async function selectWorkItem(itemId) {
 
 async function loadDetail(itemId, { preserveContent = false } = {}) {
   try {
+    const previousDetail = state.detail?.item?.id === itemId ? state.detail : null;
+    const expandedAttemptIds = previousDetail?.expandedAttemptIds || new Set();
+    const attemptEvents = previousDetail?.attemptEvents || {};
     const [item, events, attempts, decisions] = await Promise.all([
       api(`/api/work-items/${encodeURIComponent(itemId)}`),
       api(`/api/work-items/${encodeURIComponent(itemId)}/events`),
@@ -617,7 +620,21 @@ async function loadDetail(itemId, { preserveContent = false } = {}) {
       api(`/api/work-items/${encodeURIComponent(itemId)}/decisions`),
     ]);
     if (state.selectedItemId !== itemId) return;
-    state.detail = { item, events, attempts, decisions };
+    state.detail = { item, events, attempts, decisions, attemptEvents, expandedAttemptIds, loadingAttemptIds: new Set() };
+    if (expandedAttemptIds.size) {
+      const refreshed = await Promise.all([...expandedAttemptIds].map(async (attemptId) => {
+        try {
+          const trace = await api(`/api/work-items/${encodeURIComponent(itemId)}/attempts/${encodeURIComponent(attemptId)}/events`);
+          return [attemptId, trace];
+        } catch (_error) {
+          return [attemptId, attemptEvents[attemptId]];
+        }
+      }));
+      if (state.selectedItemId !== itemId) return;
+      refreshed.forEach(([attemptId, trace]) => {
+        if (trace) state.detail.attemptEvents[attemptId] = trace;
+      });
+    }
     const workItemIndex = state.workItems.findIndex((candidate) => candidate.id === item.id);
     if (workItemIndex >= 0) state.workItems[workItemIndex] = item;
     renderDrawer();
@@ -706,16 +723,95 @@ function renderAttempts(detail) {
   if (!detail.attempts.length) return '<div class="empty-state"><div><strong>还没有执行记录</strong>Runner 领取任务后会创建 Attempt。</div></div>';
   return [...detail.attempts].reverse().map((attempt) => {
     const profile = attempt.profile_snapshot || {};
+    const expanded = detail.expandedAttemptIds?.has(attempt.id);
+    const trace = detail.attemptEvents?.[attempt.id];
+    const loading = detail.loadingAttemptIds?.has(attempt.id);
     return `<article class="attempt-card">
-      <div class="attempt-head"><strong>Attempt #${attempt.attempt_number}</strong>${statusChip(attempt.status)}</div>
+      <button class="attempt-toggle" type="button" data-attempt-toggle="${escapeHtml(attempt.id)}" aria-expanded="${expanded ? "true" : "false"}">
+        <span class="attempt-head"><strong>Attempt #${attempt.attempt_number}</strong>${statusChip(attempt.status)}</span>
+        <span class="attempt-caret" aria-hidden="true">⌄</span>
+      </button>
       <dl>
         <div><dt>Worker</dt><dd>${escapeHtml(attempt.worker_id)}</dd></div>
         <div><dt>Profile</dt><dd>${escapeHtml(profile.profile_name || "—")} ${profile.profile_version ? `v${profile.profile_version}` : ""}</dd></div>
         <div><dt>Thread</dt><dd title="${escapeHtml(attempt.thread_id || "")}">${escapeHtml(compactId(attempt.thread_id))}</dd></div>
         <div><dt>Started</dt><dd>${escapeHtml(formatDate(attempt.started_at, true))}</dd></div>
       </dl>
+      ${expanded ? renderAttemptTrace(trace, loading) : ""}
     </article>`;
   }).join("");
+}
+
+const ATTEMPT_EVENT_LABELS = {
+  turn_started: "Turn 启动",
+  turn_completed: "Turn 完成",
+  turn_failed: "Turn 失败",
+  turn_cancelled: "Turn 取消",
+  command_started: "命令开始",
+  command_completed: "命令完成",
+  agent_message_started: "Agent 消息生成中",
+  agent_message_completed: "Agent 消息",
+  file_change_started: "文件修改开始",
+  file_change_completed: "文件修改完成",
+  tool_call_started: "工具调用",
+  tool_call_completed: "工具完成",
+  input_required: "等待人工输入",
+  item_started: "执行步骤开始",
+  item_completed: "执行步骤完成",
+};
+
+function renderAttemptTrace(trace, loading) {
+  if (loading && !trace) return '<div class="attempt-trace-state">正在加载执行详情…</div>';
+  if (!trace?.length) return '<div class="attempt-trace-state">这个 Attempt 没有已保存的执行事件。</div>';
+  return `<div class="attempt-trace">${trace.map((event) => {
+    const payload = event.payload || {};
+    const meta = [];
+    if (payload.tool_name) meta.push(payload.tool_name);
+    if (payload.exit_code !== undefined && payload.exit_code !== null) meta.push(`exit ${payload.exit_code}`);
+    const changes = Array.isArray(payload.changes)
+      ? payload.changes.map((change) => change.path).filter(Boolean)
+      : [];
+    const detail = event.detail
+      ? `<details class="attempt-event-detail"><summary>查看输出</summary><pre>${escapeHtml(event.detail)}</pre></details>`
+      : "";
+    return `<article class="attempt-event ${event.status === "failed" ? "failed" : ""}">
+      <span class="attempt-event-dot"></span>
+      <div class="attempt-event-copy">
+        <div class="attempt-event-title"><strong>${escapeHtml(ATTEMPT_EVENT_LABELS[event.event_type] || event.event_type)}</strong><time>${escapeHtml(formatDate(event.created_at, true))}</time></div>
+        <p>${escapeHtml(event.summary)}</p>
+        ${meta.length ? `<small>${escapeHtml(meta.join(" · "))}</small>` : ""}
+        ${changes.length ? `<div class="attempt-event-files">${changes.map((path) => `<code>${escapeHtml(path)}</code>`).join("")}</div>` : ""}
+        ${detail}
+      </div>
+    </article>`;
+  }).join("")}</div>`;
+}
+
+async function toggleAttemptTrace(attemptId) {
+  if (!state.detail) return;
+  const expanded = state.detail.expandedAttemptIds;
+  if (expanded.has(attemptId)) {
+    expanded.delete(attemptId);
+    renderDrawerContent();
+    return;
+  }
+  expanded.add(attemptId);
+  renderDrawerContent();
+  if (state.detail.attemptEvents[attemptId]) return;
+  state.detail.loadingAttemptIds.add(attemptId);
+  renderDrawerContent();
+  const itemId = state.detail.item.id;
+  try {
+    const trace = await api(`/api/work-items/${encodeURIComponent(itemId)}/attempts/${encodeURIComponent(attemptId)}/events`);
+    if (state.detail?.item?.id === itemId) state.detail.attemptEvents[attemptId] = trace;
+  } catch (error) {
+    toast(`执行详情加载失败：${error.message}`, "error");
+  } finally {
+    if (state.detail?.item?.id === itemId) {
+      state.detail.loadingAttemptIds.delete(attemptId);
+      renderDrawerContent();
+    }
+  }
 }
 
 function renderArtifacts(detail) {
@@ -999,6 +1095,11 @@ document.querySelectorAll(".drawer-tab").forEach((tab) => {
 dom.drawerActions.addEventListener("click", (event) => {
   const button = event.target.closest("[data-action]");
   if (button) openActionModal(button.dataset.action);
+});
+
+dom.drawerContent.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-attempt-toggle]");
+  if (button) toggleAttemptTrace(button.dataset.attemptToggle);
 });
 
 dom.tokenForm.addEventListener("submit", (event) => {

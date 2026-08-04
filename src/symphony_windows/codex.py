@@ -306,6 +306,16 @@ class CodexAppServer:
                     arguments,
                     thread_id=thread_id,
                 )
+                await self._emit(
+                    {
+                        "method": "control_plane/tool/completed",
+                        "params": {
+                            "tool": name,
+                            "success": execution.response.get("success", False),
+                            "result": execution.response.get("result"),
+                        },
+                    }
+                )
                 await self._send({"id": message["id"], "result": execution.response})
                 if execution.stop_agent:
                     return "work_item_released"

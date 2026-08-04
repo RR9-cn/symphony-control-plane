@@ -206,6 +206,32 @@ class AttemptContextUpdate(ApiModel):
     )
 
 
+class AgentAttemptEventCreate(ApiModel):
+    claim_token: str = Field(
+        validation_alias=AliasChoices("claim_token", "claimToken"), min_length=16
+    )
+    event_type: str = Field(min_length=1, max_length=64)
+    item_type: str | None = Field(default=None, max_length=100)
+    status: str | None = Field(default=None, max_length=64)
+    summary: str = Field(min_length=1, max_length=1000)
+    detail: str | None = Field(default=None, max_length=16000)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentAttemptEventView(ApiModel):
+    id: str
+    attempt_id: str
+    work_item_id: str
+    sequence: int
+    event_type: str
+    item_type: str | None
+    status: str | None
+    summary: str
+    detail: str | None
+    payload: dict[str, Any]
+    created_at: datetime
+
+
 class WorkerRegistration(ApiModel):
     worker_id: str = Field(
         validation_alias=AliasChoices("worker_id", "workerId"), min_length=1

@@ -225,6 +225,60 @@ async def test_agent_runtime_tracks_thread_turn_and_human_gate(api) -> None:
     assert attempts[0]["thread_id"] == "thread-runtime-01"
 
 
+async def test_attempt_execution_events_are_ordered_authorized_and_redacted(api) -> None:
+    await create_fixture(api, work_item_payload("WI-001", status="ready"))
+    claim = await api.post(
+        "/api/work-items/WI-001/claim",
+        json={"workerId": "runner-01", "expectedVersion": 1, "leaseSeconds": 60},
+    )
+    assert claim.status_code == 200, claim.text
+    token = claim.json()["claim_token"]
+    attempt_id = claim.json()["attempt"]["id"]
+    endpoint = f"/api/work-items/WI-001/attempts/{attempt_id}/events"
+
+    first = await api.post(
+        endpoint,
+        json={
+            "claimToken": token,
+            "event_type": "command_completed",
+            "item_type": "commandExecution",
+            "status": "completed",
+            "summary": "Authorization: Bearer trace-secret",
+            "detail": "API_TOKEN=trace-secret command output",
+            "payload": {"exit_code": 0, "api_token": "trace-secret"},
+        },
+    )
+    assert first.status_code == 201, first.text
+    assert first.json()["sequence"] == 1
+    assert "trace-secret" not in first.text
+    assert "[REDACTED]" in first.text
+
+    second = await api.post(
+        endpoint,
+        json={
+            "claimToken": token,
+            "event_type": "agent_message_completed",
+            "summary": "Agent message completed",
+            "detail": "The implementation is ready.",
+        },
+    )
+    assert second.status_code == 201, second.text
+    assert second.json()["sequence"] == 2
+
+    rejected = await api.post(
+        endpoint,
+        json={
+            "claimToken": "x" * 32,
+            "event_type": "turn_started",
+            "summary": "Codex Turn started",
+        },
+    )
+    assert rejected.status_code == 409
+
+    events = (await api.get(endpoint, params={"after_sequence": 1})).json()
+    assert [event["sequence"] for event in events] == [2]
+
+
 async def test_manual_issue_preview_and_atomic_creation(api) -> None:
     payload = {
         "feature_id": "FEATURE-7001",

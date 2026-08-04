@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from symphony_windows.codex import CodexAppServer, CodexError, CodexRunResult
+from symphony_windows.attempt_events import normalize_codex_event
 from symphony_windows.skill import SkillManager
 from symphony_windows.tracker import (
     ClaimConflict,
@@ -254,6 +255,7 @@ class WindowsSymphony:
                         }
                     )
                 ),
+                on_event=lambda message: self._record_codex_event(lease, message),
             )
             codex_task = asyncio.create_task(
                 codex.run(
@@ -368,6 +370,21 @@ class WindowsSymphony:
                     await self.workspace_manager.after_run(
                         _normalize_issue(lease.item), workspace
                     )
+
+    async def _record_codex_event(
+        self, lease: ClaimLease, message: dict[str, Any]
+    ) -> None:
+        event = normalize_codex_event(message)
+        if event is None or not lease.active:
+            return
+        try:
+            await self.tracker.add_attempt_event(lease, event)
+        except TrackerError:
+            logger.warning(
+                "failed to persist execution event for WorkItem %s",
+                lease.id,
+                exc_info=True,
+            )
 
     async def _heartbeat_loop(self, lease: ClaimLease) -> None:
         interval = max(3.0, self.workflow.tracker.lease_seconds / 3)

@@ -54,6 +54,8 @@ POST   /api/work-items/{id}/artifacts
 POST   /api/work-items/{id}/decisions
 GET    /api/work-items/{id}/decisions
 GET    /api/work-items/{id}/attempts
+POST   /api/work-items/{id}/attempts/{attempt_id}/events
+GET    /api/work-items/{id}/attempts/{attempt_id}/events
 
 GET    /api/agent-profiles
 GET    /api/workers
@@ -81,6 +83,11 @@ Windows Runner 启动时向 `/api/workers/register` 注册，并在空闲和执�
 `/api/agent-runtimes` 把 WorkItem 与最新 Attempt 合并为 Agent 视角状态；Thread 和
 Turn 通过 `attempt-context` 在运行中实时登记。`runner-control` 只管理与当前控制面
 同机的托管 Runner，不远程启动其他宿主机进程。
+
+Runner 使用 Attempt Event 接口上报 Codex 的 Turn、Agent 消息、命令、工具调用和
+文件变更。写入要求当前 Claim Token，事件按 Attempt 内 `sequence` 排序；查询支持
+`after_sequence` 和 `limit`。Runner 只发送展示所需字段，控制面再次执行长度限制与
+敏感信息脱敏。Reasoning 事件只保存生命周期，不保存推理文本。
 
 `claim` 请求兼容协议示例中的 camelCase：
 

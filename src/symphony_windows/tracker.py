@@ -271,6 +271,23 @@ class ControlPlaneTracker:
         lease.attempt = payload
         return payload
 
+    async def add_attempt_event(
+        self, lease: ClaimLease, event: dict[str, Any]
+    ) -> dict[str, Any]:
+        self._require_active(lease)
+        attempt_id = lease.attempt.get("id") if lease.attempt is not None else None
+        if not isinstance(attempt_id, str) or not attempt_id:
+            raise TrackerError("claim is missing an agent attempt id")
+        payload = await self._request(
+            "POST",
+            self._item_path(lease.id)
+            + f"/attempts/{quote(attempt_id, safe='')}/events",
+            json={**event, "claimToken": lease.token},
+        )
+        if not isinstance(payload, dict):
+            raise TrackerError("attempt event response must be an object")
+        return payload
+
     def tool_specs(self) -> list[dict[str, Any]]:
         empty = {"type": "object", "additionalProperties": False, "properties": {}}
         return [

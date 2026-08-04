@@ -218,6 +218,24 @@ async def test_windows_runner_drives_codex_and_completes_work_item(
     assert len(skill_snapshot["fskill-analysis-tech"]["revision"]) == 40
     assert len(skill_snapshot["fskill-analysis-tech"]["content_hash"]) == 64
     assert len(attempts[0]["profile_snapshot"]["prompt_hash"]) == 64
+    execution_events = (
+        await authenticated_api.get(
+            f"/api/work-items/WI-001/attempts/{attempts[0]['id']}/events",
+            headers=headers,
+        )
+    ).json()
+    execution_types = [event["event_type"] for event in execution_events]
+    assert "turn_started" in execution_types
+    assert "command_completed" in execution_types
+    assert "agent_message_completed" in execution_types
+    assert "tool_call_started" in execution_types
+    serialized_events = str(execution_events)
+    assert "trace-secret" not in serialized_events
+    assert "private reasoning must never be persisted" not in serialized_events
+    reasoning = next(
+        event for event in execution_events if event["item_type"] == "reasoning"
+    )
+    assert reasoning["detail"] is None
     installed = tmp_path / "workspaces" / "WI-001" / ".agents" / "skills"
     assert [path.name for path in installed.iterdir()] == ["fskill-analysis-tech"]
 

@@ -43,7 +43,7 @@ python -m uvicorn control_plane.app:app --app-dir src --host 127.0.0.1 --port 80
 http://127.0.0.1:8080/
 ```
 
-看板提供手工 Issue 录入与五阶段拆分预览、Feature 筛选、WorkItem 状态列、Attempt/Event 时间线、Artifact、人工决策、阶段审批、返工、解阻、取消和重试维护操作。后端启用 `ACP_API_TOKEN` 时，可在页面右上角录入 Token；Token 只保存在当前浏览器标签页的 `sessionStorage`。本期不连接外部 Issue 平台。
+看板提供手工 Issue 录入与五阶段拆分预览、Feature 筛选、WorkItem 状态列、可展开的 Attempt 执行详情、Event 时间线、Artifact、人工决策、阶段审批、返工、解阻、取消和重试维护操作。执行详情展示 Turn、Agent 消息、命令、工具和文件变更，不保存模型推理文本。后端启用 `ACP_API_TOKEN` 时，可在页面右上角录入 Token；Token 只保存在当前浏览器标签页的 `sessionStorage`。本期不连接外部 Issue 平台。
 
 ## 协议校验
 

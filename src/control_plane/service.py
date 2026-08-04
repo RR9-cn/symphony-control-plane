@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -20,6 +21,7 @@ from control_plane.errors import (
 )
 from control_plane.models import (
     AgentAttempt,
+    AgentAttemptEvent,
     AgentProfile,
     Feature,
     HumanDecision,
@@ -32,6 +34,8 @@ from control_plane.models import (
 )
 from control_plane.protocol import PROTOCOL
 from control_plane.schemas import (
+    AgentAttemptEventCreate,
+    AgentAttemptEventView,
     AgentAttemptView,
     AgentRuntimeView,
     AgentProfileView,
@@ -73,6 +77,50 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+_TRACE_SENSITIVE_KEY = re.compile(
+    r"(?:^|[_-])(token|secret|password|credential|authorization|cookie|api[_-]?key)(?:$|[_-])",
+    re.IGNORECASE,
+)
+_TRACE_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b(api[_-]?(?:key|token)|access[_-]?token|refresh[_-]?token|password|secret|authorization)"
+    r"(\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+)
+_TRACE_BEARER = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+\-/=]+")
+_TRACE_OPENAI_KEY = re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b")
+
+
+def _scrub_trace_text(value: object, limit: int) -> str:
+    text = str(value).replace("\x00", "")
+    text = _TRACE_BEARER.sub(r"\1[REDACTED]", text)
+    text = _TRACE_SECRET_ASSIGNMENT.sub(r"\1\2[REDACTED]", text)
+    text = _TRACE_OPENAI_KEY.sub("[REDACTED]", text)
+    if len(text) > limit:
+        text = text[: limit - 1] + "…"
+    return text
+
+
+def _scrub_trace_payload(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 5:
+        return "[TRUNCATED]"
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for raw_key, raw_value in list(value.items())[:50]:
+            key = _scrub_trace_text(raw_key, 100)
+            result[key] = (
+                "[REDACTED]"
+                if _TRACE_SENSITIVE_KEY.search(key)
+                else _scrub_trace_payload(raw_value, depth=depth + 1)
+            )
+        return result
+    if isinstance(value, list):
+        return [_scrub_trace_payload(item, depth=depth + 1) for item in value[:50]]
+    if isinstance(value, str):
+        return _scrub_trace_text(value, 4000)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _scrub_trace_text(value, 1000)
 
 
 _MANUAL_ISSUE_STAGES = (
@@ -727,6 +775,72 @@ class ControlPlaneService:
             )
         ).all()
         return [AgentAttemptView.model_validate(attempt) for attempt in attempts]
+
+    async def add_attempt_event(
+        self,
+        item_id: str,
+        attempt_id: str,
+        command: AgentAttemptEventCreate,
+    ) -> AgentAttemptEventView:
+        async with self.session.begin():
+            item = await self.session.get(WorkItem, item_id)
+            if item is None:
+                raise NotFoundError(f"work item not found: {item_id}")
+            self._verify_claim(item, command.claim_token)
+            attempt = await self.session.get(AgentAttempt, attempt_id)
+            if attempt is None or attempt.work_item_id != item_id:
+                raise NotFoundError(f"agent attempt not found: {attempt_id}")
+            if attempt.completed_at is not None:
+                raise ConflictError("cannot append events to a completed agent attempt")
+            last_sequence = await self.session.scalar(
+                select(func.max(AgentAttemptEvent.sequence)).where(
+                    AgentAttemptEvent.attempt_id == attempt_id
+                )
+            )
+            event = AgentAttemptEvent(
+                attempt_id=attempt_id,
+                work_item_id=item_id,
+                sequence=(last_sequence or 0) + 1,
+                event_type=command.event_type,
+                item_type=command.item_type,
+                status=command.status,
+                summary=_scrub_trace_text(command.summary, 1000),
+                detail=(
+                    _scrub_trace_text(command.detail, 16000)
+                    if command.detail is not None
+                    else None
+                ),
+                payload=_scrub_trace_payload(command.payload),
+            )
+            self.session.add(event)
+            await self.session.flush()
+        return AgentAttemptEventView.model_validate(event)
+
+    async def list_attempt_events(
+        self,
+        item_id: str,
+        attempt_id: str,
+        *,
+        after_sequence: int = 0,
+        limit: int = 500,
+    ) -> list[AgentAttemptEventView]:
+        if await self.session.get(WorkItem, item_id) is None:
+            raise NotFoundError(f"work item not found: {item_id}")
+        attempt = await self.session.get(AgentAttempt, attempt_id)
+        if attempt is None or attempt.work_item_id != item_id:
+            raise NotFoundError(f"agent attempt not found: {attempt_id}")
+        events = (
+            await self.session.scalars(
+                select(AgentAttemptEvent)
+                .where(
+                    AgentAttemptEvent.attempt_id == attempt_id,
+                    AgentAttemptEvent.sequence > after_sequence,
+                )
+                .order_by(AgentAttemptEvent.sequence)
+                .limit(limit)
+            )
+        ).all()
+        return [AgentAttemptEventView.model_validate(event) for event in events]
 
     async def heartbeat(self, item_id: str, command: HeartbeatRequest) -> WorkItemView:
         now = utc_now()

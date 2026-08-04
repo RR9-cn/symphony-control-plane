@@ -221,6 +221,30 @@ class AgentAttempt(Base):
     )
 
 
+class AgentAttemptEvent(Base):
+    __tablename__ = "agent_attempt_events"
+    __table_args__ = (
+        UniqueConstraint("attempt_id", "sequence", name="uq_attempt_event_sequence"),
+        Index("ix_attempt_events_attempt_sequence", "attempt_id", "sequence"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    attempt_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_attempts.id", ondelete="CASCADE"), index=True
+    )
+    work_item_id: Mapped[str] = mapped_column(
+        ForeignKey("work_items.id", ondelete="CASCADE"), index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer)
+    event_type: Mapped[str] = mapped_column(String(64))
+    item_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    summary: Mapped[str] = mapped_column(String(1000))
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON_VALUE, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class HumanDecision(Base):
     __tablename__ = "human_decisions"
 
