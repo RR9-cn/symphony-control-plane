@@ -284,7 +284,12 @@ class ControlPlaneService:
         delay = self.settings.default_retry_delay_seconds if command.retry_delay_seconds is None else command.retry_delay_seconds
         async with self.session.begin():
             issue = await self._require_running_claim(issue_id, command.claim_token)
-            await self._finish_attempt(issue_id, "retry_queued", thread_id=command.thread_id)
+            await self._finish_attempt(
+                issue_id,
+                "retry_queued",
+                thread_id=command.thread_id,
+                status_reason=command.reason,
+            )
             actor = issue.claim_worker_id
             self._clear_claim(issue)
             issue.status = "retry_queued"
@@ -658,9 +663,17 @@ class ControlPlaneService:
             raise ClaimError("active attempt not found")
         return attempt
 
-    async def _finish_attempt(self, issue_id: str, status: str, *, thread_id: str | None = None) -> None:
+    async def _finish_attempt(
+        self,
+        issue_id: str,
+        status: str,
+        *,
+        thread_id: str | None = None,
+        status_reason: str | None = None,
+    ) -> None:
         attempt = await self._active_attempt(issue_id)
         attempt.status = status
+        attempt.status_reason = status_reason
         attempt.completed_at = utc_now()
         if thread_id:
             attempt.thread_id = thread_id

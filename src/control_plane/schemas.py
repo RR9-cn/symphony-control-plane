@@ -221,9 +221,12 @@ class AgentAttemptView(ApiModel):
     worker_id: str
     config_snapshot: dict[str, Any]
     status: str
+    status_reason: str | None
     thread_id: str | None
     turn_id: str | None
+    session_id: str | None
     turn_count: int
+    duration_seconds: float
     started_at: datetime
     completed_at: datetime | None
 

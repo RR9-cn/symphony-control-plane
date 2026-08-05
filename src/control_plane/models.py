@@ -184,11 +184,28 @@ class AgentAttempt(Base):
     worker_id: Mapped[str] = mapped_column(String(200))
     config_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON_VALUE, default=dict)
     status: Mapped[str] = mapped_column(String(32), default="running")
+    status_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     thread_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     turn_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     turn_count: Mapped[int] = mapped_column(Integer, default=0)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    @property
+    def session_id(self) -> str | None:
+        if self.thread_id and self.turn_id:
+            return f"{self.thread_id}-{self.turn_id}"
+        return None
+
+    @property
+    def duration_seconds(self) -> float:
+        started_at = self.started_at
+        completed_at = self.completed_at or utc_now()
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+        if completed_at.tzinfo is None:
+            completed_at = completed_at.replace(tzinfo=timezone.utc)
+        return max(0.0, round((completed_at - started_at).total_seconds(), 3))
 
 
 class AgentAttemptEvent(Base):

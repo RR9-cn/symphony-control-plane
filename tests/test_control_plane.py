@@ -169,6 +169,9 @@ async def test_single_attempt_supports_multiple_turns_and_completion(api):
     assert attempts[0]["status"] == "reviewing"
     assert attempts[0]["thread_id"] == "thread-1"
     assert attempts[0]["turn_count"] == 3
+    assert attempts[0]["session_id"] == "thread-1-turn-3"
+    assert attempts[0]["status_reason"] is None
+    assert attempts[0]["duration_seconds"] >= 0
 
 
 async def test_release_retries_and_resumes_same_thread(api):
@@ -183,6 +186,10 @@ async def test_release_retries_and_resumes_same_thread(api):
         },
     )
     assert released.json()["status"] == "retry_queued"
+    attempts = (await api.get("/api/issues/ISSUE-001/attempts")).json()
+    assert attempts[0]["status_reason"] == "continuation_after_max_turns"
+    assert attempts[0]["session_id"] is None
+    assert attempts[0]["duration_seconds"] >= 0
     assert (await api.post("/api/maintenance/tick")).json()["readied"] == 1
     current = (await api.get("/api/issues/ISSUE-001")).json()
     resumed = await api.post("/api/issues/ISSUE-001/claim", json=claim_payload(current["version"]))

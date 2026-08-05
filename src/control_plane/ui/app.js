@@ -17,6 +17,29 @@ const STATUS = {
 };
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
 const short = (value, size = 12) => value ? `${String(value).slice(0, size)}${String(value).length > size ? "…" : ""}` : "—";
+const formatDate = (value) => value ? new Date(value).toLocaleString() : "—";
+function formatDuration(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value)) return "—";
+  if (value < 1) return `${Math.round(value * 1000)}ms`;
+  if (value < 60) return `${value.toFixed(1)}s`;
+  const minutes = Math.floor(value / 60); const remainder = Math.round(value % 60);
+  return `${minutes}m ${remainder}s`;
+}
+
+function renderAttempt(attempt, index, issue) {
+  const phase = attempt.turn_count > 0 ? `Turn ${attempt.turn_count}` : attempt.thread_id ? "Session 已创建，尚未进入 Turn" : "尚未创建 Codex Session / Turn";
+  const retry = index === 0 && attempt.status === "retry_queued" && issue.retry_at
+    ? `<div class="attempt-retry"><span>下次重试</span><strong>${escapeHtml(formatDate(issue.retry_at))}</strong></div>`
+    : "";
+  const reason = attempt.status_reason
+    ? `<div class="attempt-reason"><span>状态原因</span><code>${escapeHtml(attempt.status_reason)}</code></div>`
+    : "";
+  return `<article class="attempt"><header><strong>Attempt #${attempt.attempt_number}</strong>${badge(attempt.status)}</header>
+    <div class="meta attempt-meta"><span>${escapeHtml(phase)}</span><span>Worker ${escapeHtml(attempt.worker_id)}</span><span>开始 ${escapeHtml(formatDate(attempt.started_at))}</span><span>耗时 ${escapeHtml(formatDuration(attempt.duration_seconds))}</span></div>
+    <div class="attempt-session"><span>Session</span><code title="${escapeHtml(attempt.session_id || "")}">${escapeHtml(short(attempt.session_id, 28))}</code></div>
+    ${reason}${retry}</article>`;
+}
 
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
@@ -132,8 +155,8 @@ async function openDetail(issueId, show = true) {
     ${issue.blocker ? `<section class="section"><h3>Blocker</h3><pre>${escapeHtml(JSON.stringify(issue.blocker, null, 2))}</pre></section>` : ""}
     ${issue.blocked_by.length ? `<section class="section"><h3>Blocked By</h3><pre>${escapeHtml(JSON.stringify(issue.blocked_by, null, 2))}</pre></section>` : ""}
     ${renderDecisions(decisions)}
-    <section class="section"><h3>Attempts</h3>${attempts.length ? attempts.map((attempt) => `<article class="attempt"><strong>Attempt #${attempt.attempt_number} · ${escapeHtml(attempt.status)}</strong><div class="meta"><span>Turn ${attempt.turn_count}</span><span>${escapeHtml(short(attempt.thread_id, 16))}</span><span>${escapeHtml(attempt.worker_id)}</span></div></article>`).join("") : '<p class="modal-copy">尚未执行</p>'}</section>
-    <section class="section"><h3>事件</h3><div class="timeline">${events.map((event) => `<article><strong>${escapeHtml(event.event)}</strong><small> · ${new Date(event.created_at).toLocaleString()}</small><div class="meta"><span>${escapeHtml(event.from_status || "—")} → ${escapeHtml(event.to_status || "—")}</span><span>${escapeHtml(event.actor_type)}</span></div></article>`).join("")}</div></section>`;
+    <section class="section"><h3>Attempts</h3>${attempts.length ? attempts.map((attempt, index) => renderAttempt(attempt, index, issue)).join("") : '<p class="modal-copy">尚未执行</p>'}</section>
+    <section class="section"><h3>事件</h3><div class="timeline">${events.map((event) => `<article><strong>${escapeHtml(event.event)}</strong><small> · ${escapeHtml(formatDate(event.created_at))}</small><div class="meta"><span>${escapeHtml(event.from_status || "—")} → ${escapeHtml(event.to_status || "—")}</span><span>${escapeHtml(event.actor_type)}</span></div>${event.payload?.reason ? `<p class="event-reason">${escapeHtml(event.payload.reason)}</p>` : ""}</article>`).join("")}</div></section>`;
     renderActions(issue, decisions);
     dom.detailError.hidden = true;
     if (show && !dom.detailModal.open) dom.detailModal.showModal();
