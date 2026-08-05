@@ -18,7 +18,7 @@ async def test_dashboard_and_issue_crud(api):
     assert dashboard.status_code == 200
     assert 'id="issue-cancel-button" type="submit" value="cancel" formnovalidate' in dashboard.text
     assert 'id="issue-close-button" type="submit" value="cancel" formnovalidate' in dashboard.text
-    assert '/ui/assets/app.js?v=20260805-2' in dashboard.text
+    assert '/ui/assets/app.js?v=20260805-3' in dashboard.text
     created = await api.post("/api/issues", json=issue_payload())
     assert created.status_code == 201
     assert created.json()["status"] == "ready"
@@ -33,6 +33,44 @@ async def test_dashboard_and_issue_crud(api):
     assert patched.json()["version"] == 2
 
 
+async def test_issue_exposes_normalized_symphony_dispatch_fields(api):
+    payload = issue_payload()
+    payload.update(
+        {
+            "identifier": "TEAM-42",
+            "url": "https://tracker.test/TEAM-42",
+            "assignee_id": "user-7",
+            "labels": ["Backend", "API"],
+            "blocked_by": [
+                {"id": "dependency-1", "identifier": "TEAM-41", "state": "DONE"}
+            ],
+            "native_ref": {"project_item_id": "PVTI_1"},
+            "dispatchable": True,
+            "branch_name": "team-42",
+        }
+    )
+    response = await api.post("/api/issues", json=payload)
+    assert response.status_code == 201, response.text
+    issue = response.json()
+    assert issue["identifier"] == "TEAM-42"
+    assert issue["state"] == "ready"
+    assert issue["labels"] == ["backend", "api"]
+    assert issue["blocked_by"][0]["state"] == "done"
+    assert issue["native_ref"] == {"project_item_id": "PVTI_1"}
+    assert issue["dispatchable"] is True
+    assert issue["branch_name"] == "team-42"
+
+
+async def test_issue_identifier_is_unique(api):
+    first = issue_payload("ISSUE-001")
+    first["identifier"] = "TEAM-1"
+    second = issue_payload("ISSUE-002")
+    second["identifier"] = "TEAM-1"
+    assert (await api.post("/api/issues", json=first)).status_code == 201
+    duplicate = await api.post("/api/issues", json=second)
+    assert duplicate.status_code == 409
+
+
 async def test_claim_is_atomic_and_attempt_is_created(api):
     await api.post("/api/issues", json=issue_payload())
     first, second = await asyncio.gather(
@@ -45,6 +83,30 @@ async def test_claim_is_atomic_and_attempt_is_created(api):
     assert body["issue"]["status"] == "running"
     assert body["attempt"]["attempt_number"] == 1
     assert body["attempt"]["config_snapshot"]["kind"] == "coding_agent"
+
+
+async def test_running_issue_accepts_routing_metadata_updates_only(api):
+    lease = await _create_and_claim(api)
+    updated = await api.patch(
+        "/api/issues/ISSUE-001",
+        json={
+            "expectedVersion": lease["issue"]["version"],
+            "dispatchable": False,
+            "labels": ["Backend"],
+            "blocked_by": [{"identifier": "ISSUE-000", "state": "running"}],
+        },
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["dispatchable"] is False
+    assert updated.json()["labels"] == ["backend"]
+    rejected = await api.patch(
+        "/api/issues/ISSUE-001",
+        json={
+            "expectedVersion": updated.json()["version"],
+            "title": "Cannot rewrite a running task",
+        },
+    )
+    assert rejected.status_code == 409
 
 
 async def test_human_can_cancel_running_issue_without_claim_token(api):

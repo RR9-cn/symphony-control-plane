@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from control_plane.models import ISSUE_STATUSES
 
@@ -27,13 +27,40 @@ class RepositoryHeadView(ApiModel):
     commit: str = Field(pattern=r"^[a-f0-9]{40}$")
 
 
+class BlockerRef(ApiModel):
+    id: str | None = Field(default=None, max_length=64)
+    identifier: str | None = Field(default=None, max_length=128)
+    state: str | None = Field(default=None, max_length=64)
+
+    @field_validator("state")
+    @classmethod
+    def normalize_state(cls, value: str | None) -> str | None:
+        return value.strip().lower() if value is not None and value.strip() else None
+
+
 class IssueCreate(ApiModel):
-    id: str = Field(pattern=r"^ISSUE-[0-9]{3,}$")
+    id: str = Field(min_length=1, max_length=64)
+    identifier: str | None = Field(default=None, min_length=1, max_length=128)
     title: str = Field(min_length=1, max_length=200)
     description: str = Field(min_length=1)
     priority: int = Field(default=2, ge=0, le=4)
     repository: RepositoryData
     acceptance_criteria: list[str] = Field(min_length=1)
+    url: str | None = Field(default=None, max_length=2000)
+    assignee_id: str | None = Field(default=None, max_length=255)
+    labels: list[str] = Field(default_factory=list)
+    blocked_by: list[BlockerRef] = Field(default_factory=list)
+    native_ref: dict[str, Any] | None = None
+    dispatchable: bool = True
+    branch_name: str | None = Field(default=None, max_length=255)
+
+    @field_validator("labels")
+    @classmethod
+    def normalize_labels(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip().lower() for value in values]
+        if any(not value for value in normalized) or len(set(normalized)) != len(normalized):
+            raise ValueError("labels must be non-blank and unique after normalization")
+        return normalized
 
     @model_validator(mode="after")
     def normalize_criteria(self) -> "IssueCreate":
@@ -41,6 +68,7 @@ class IssueCreate(ApiModel):
         if any(not value for value in values) or len(set(values)) != len(values):
             raise ValueError("acceptance criteria must be non-blank and unique")
         self.acceptance_criteria = values
+        self.identifier = (self.identifier or self.id).strip()
         return self
 
 
@@ -68,13 +96,22 @@ class ArtifactView(ArtifactData):
 
 class IssueView(ApiModel):
     id: str
+    identifier: str
     title: str
     description: str
+    state: str
     status: str
     priority: int
     version: int
     repository: RepositoryData
     acceptance_criteria: list[str]
+    url: str | None
+    assignee_id: str | None
+    labels: list[str]
+    blocked_by: list[BlockerRef]
+    native_ref: dict[str, Any] | None
+    dispatchable: bool
+    branch_name: str | None
     blocker: dict[str, Any] | None
     claim: ClaimView
     retry_at: datetime | None
@@ -93,6 +130,24 @@ class IssuePatch(ApiModel):
     description: str | None = Field(default=None, min_length=1)
     priority: int | None = Field(default=None, ge=0, le=4)
     acceptance_criteria: list[str] | None = Field(default=None, min_length=1)
+    identifier: str | None = Field(default=None, min_length=1, max_length=128)
+    url: str | None = Field(default=None, max_length=2000)
+    assignee_id: str | None = Field(default=None, max_length=255)
+    labels: list[str] | None = None
+    blocked_by: list[BlockerRef] | None = None
+    native_ref: dict[str, Any] | None = None
+    dispatchable: bool | None = None
+    branch_name: str | None = Field(default=None, max_length=255)
+
+    @field_validator("labels")
+    @classmethod
+    def normalize_labels(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return None
+        normalized = [value.strip().lower() for value in values]
+        if any(not value for value in normalized) or len(set(normalized)) != len(normalized):
+            raise ValueError("labels must be non-blank and unique after normalization")
+        return normalized
 
 
 class IssueDeliveryCommand(ApiModel):

@@ -2,6 +2,8 @@
 
 调度单位只有 `Issue`。一个 Issue 由一个通用 Coding Agent 在一个持久 Workspace 中完成分析、实现与验证，不再拆成 Feature、WorkItem、Role 或 Stage。
 
+Issue 对调度器暴露稳定的标准字段：不透明 `id`、人类可读且唯一的 `identifier`、归一化 `state`、小写 `labels`、`blocked_by`、非敏感 `native_ref` 和 Adapter 派生的 `dispatchable`。调度器而不是 Tracker 查询端负责最终的状态、标签、路由和并发过滤。
+
 一次领取创建一个 `Attempt`。正常执行可在同一 Attempt、同一 Codex Thread 和同一 Lease 中连续运行多个 Turn；Turn 完成不改变 Issue 状态。只有以下语义事件结束运行：
 
 - `issue_complete`：进入 `reviewing`，等待一次最终人工验收；

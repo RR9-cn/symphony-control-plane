@@ -6,7 +6,7 @@ import re
 import socket
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import quote
 
 import httpx
@@ -46,6 +46,77 @@ class ToolExecution:
     stop_agent: bool = False
 
 
+class TrackerAdapter(Protocol):
+    """Scheduler-facing tracker boundary plus optional host-side agent tools."""
+
+    config: TrackerConfig
+
+    async def fetch_issues_by_states(
+        self, state_names: list[str]
+    ) -> list[dict[str, Any]]: ...
+
+    async def fetch_issues_by_ids(
+        self, issue_ids: list[str]
+    ) -> list[dict[str, Any]]: ...
+
+    async def claim(
+        self, issue: dict[str, Any], agent_snapshot: dict[str, Any]
+    ) -> ClaimLease: ...
+
+    async def refresh_claim(self, lease: ClaimLease) -> bool: ...
+
+    async def heartbeat(self, lease: ClaimLease) -> dict[str, Any]: ...
+
+    async def release(
+        self,
+        lease: ClaimLease,
+        reason: str,
+        *,
+        retry_delay_seconds: int,
+        thread_id: str | None = None,
+    ) -> dict[str, Any]: ...
+
+    async def maintenance_tick(self) -> dict[str, Any]: ...
+
+    async def register_worker(self, *, capacity: int) -> dict[str, Any]: ...
+
+    async def heartbeat_worker(
+        self, *, active_issues: list[str]
+    ) -> dict[str, Any]: ...
+
+    async def worker_stopped(self) -> dict[str, Any]: ...
+
+    async def update_attempt_context(
+        self,
+        lease: ClaimLease,
+        *,
+        thread_id: str,
+        turn_id: str | None = None,
+        turn_count: int | None = None,
+    ) -> dict[str, Any]: ...
+
+    async def add_attempt_event(
+        self, lease: ClaimLease, event: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
+    async def request_runtime_input(
+        self, lease: ClaimLease, question: str
+    ) -> None: ...
+
+    async def close(self) -> None: ...
+
+    def tool_specs(self) -> list[dict[str, Any]]: ...
+
+    async def execute_tool(
+        self,
+        lease: ClaimLease,
+        name: str | None,
+        arguments: Any,
+        *,
+        thread_id: str | None = None,
+    ) -> ToolExecution: ...
+
+
 class ControlPlaneTracker:
     def __init__(self, config: TrackerConfig, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self.config = config
@@ -58,18 +129,37 @@ class ControlPlaneTracker:
         await self._client.aclose()
 
     async def candidates(self, limit: int = 100) -> list[dict[str, Any]]:
-        payload = await self._request("GET", "/api/issues/candidates", params={"limit": limit})
+        return (await self.fetch_issues_by_states(list(self.config.active_states)))[
+            :limit
+        ]
+
+    async def fetch_issues_by_states(
+        self, state_names: list[str]
+    ) -> list[dict[str, Any]]:
+        if not state_names:
+            return []
+        payload = await self._request(
+            "GET",
+            "/api/issues",
+            params=[("state", _state(state)) for state in state_names],
+        )
         if not isinstance(payload, list):
-            raise TrackerError("candidate response must be a list")
-        return [row for row in payload if isinstance(row, dict)]
+            raise TrackerError("issue state response must be a list")
+        return [
+            _normalize_issue(row, self.config)
+            for row in payload
+            if isinstance(row, dict)
+        ]
 
     async def get_issue(self, issue_id: str) -> dict[str, Any]:
         payload = await self._request("GET", self._issue_path(issue_id))
         if not isinstance(payload, dict):
             raise TrackerError("issue response must be an object")
-        return payload
+        return _normalize_issue(payload, self.config)
 
-    async def issues_by_ids(self, issue_ids: list[str]) -> list[dict[str, Any]]:
+    async def fetch_issues_by_ids(
+        self, issue_ids: list[str]
+    ) -> list[dict[str, Any]]:
         if not issue_ids:
             return []
         payload = await self._request(
@@ -77,15 +167,17 @@ class ControlPlaneTracker:
         )
         if not isinstance(payload, list):
             raise TrackerError("issue refresh response must be a list")
-        return [row for row in payload if isinstance(row, dict)]
+        return [
+            _normalize_issue(row, self.config)
+            for row in payload
+            if isinstance(row, dict)
+        ]
+
+    async def issues_by_ids(self, issue_ids: list[str]) -> list[dict[str, Any]]:
+        return await self.fetch_issues_by_ids(issue_ids)
 
     async def terminal_issues(self) -> list[dict[str, Any]]:
-        payload = await self._request(
-            "GET", "/api/issues", params=[("state", "done"), ("state", "cancelled")]
-        )
-        if not isinstance(payload, list):
-            raise TrackerError("terminal issue response must be a list")
-        return [row for row in payload if isinstance(row, dict)]
+        return await self.fetch_issues_by_states(list(self.config.terminal_states))
 
     async def refresh_claim(self, lease: ClaimLease) -> bool:
         """Refresh one live claim before starting another Turn.
@@ -104,7 +196,11 @@ class ControlPlaneTracker:
         claim = issue.get("claim")
         worker_id = claim.get("worker_id") if isinstance(claim, dict) else None
         lease.issue = issue
-        if issue.get("status") != "running" or worker_id != self.config.worker_id:
+        if (
+            _state(issue.get("state")) not in self.config.active_states
+            or not _issue_routable(issue, self.config)
+            or worker_id != self.config.worker_id
+        ):
             lease.active = False
             return False
         return True
@@ -132,7 +228,7 @@ class ControlPlaneTracker:
         if not isinstance(claimed, dict) or not isinstance(token, str) or not isinstance(attempt, dict):
             raise TrackerError("claim response is invalid")
         return ClaimLease(
-            issue=claimed, token=token, attempt=attempt,
+            issue=_normalize_issue(claimed, self.config), token=token, attempt=attempt,
             resume_thread_id=payload.get("resume_thread_id"),
             resume_decisions=payload.get("resume_decisions", []),
             continuation_turn_count=payload.get("continuation_turn_count", 0),
@@ -150,8 +246,8 @@ class ControlPlaneTracker:
                 lease.active = False
                 raise ClaimConflict(str(error), status_code=409) from error
             raise
-        lease.issue = payload
-        return payload
+        lease.issue = _normalize_issue(payload, self.config)
+        return lease.issue
 
     async def release(self, lease: ClaimLease, reason: str, *, retry_delay_seconds: int, thread_id: str | None = None) -> dict[str, Any]:
         self._require_active(lease)
@@ -160,8 +256,8 @@ class ControlPlaneTracker:
             body["threadId"] = thread_id
         payload = await self._request("POST", self._issue_path(lease.id) + "/release", json=body)
         lease.active = False
-        lease.issue = payload
-        return payload
+        lease.issue = _normalize_issue(payload, self.config)
+        return lease.issue
 
     async def maintenance_tick(self) -> dict[str, Any]:
         return await self._request("POST", "/api/maintenance/tick", json={})
@@ -272,9 +368,9 @@ class ControlPlaneTracker:
             "POST", self._issue_path(lease.id) + "/status",
             json={"to_status": status, "event": event, "actor_type": "worker", "actor_id": self.config.worker_id, "claimToken": lease.token, "payload": payload},
         )
-        lease.issue = body
+        lease.issue = _normalize_issue(body, self.config)
         lease.active = False
-        return body
+        return lease.issue
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         try:
@@ -299,6 +395,12 @@ class ControlPlaneTracker:
     def _require_active(lease: ClaimLease) -> None:
         if not lease.active:
             raise TrackerError("the current Issue claim is no longer active")
+
+
+def create_tracker_adapter(config: TrackerConfig) -> TrackerAdapter:
+    if config.kind in {"fshows_control_plane", "windows_control_plane"}:
+        return ControlPlaneTracker(config)
+    raise TrackerError(f"unsupported tracker adapter: {config.kind}")
 
 
 def _tool(name: str, description: str, schema: dict[str, Any]) -> dict[str, Any]:
@@ -330,3 +432,50 @@ def _valid_path(value: str) -> bool:
 def _tool_response(success: bool, payload: Any) -> dict[str, Any]:
     output = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
     return {"success": success, "output": output, "contentItems": [{"type": "inputText", "text": output}]}
+
+
+def _state(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def _normalize_issue(
+    payload: dict[str, Any], config: TrackerConfig
+) -> dict[str, Any]:
+    issue = dict(payload)
+    issue["id"] = str(payload.get("id") or "")
+    issue["identifier"] = str(payload.get("identifier") or issue["id"])
+    issue["state"] = _state(payload.get("state") or payload.get("status"))
+    raw_labels = payload.get("labels")
+    labels = raw_labels if isinstance(raw_labels, list) else []
+    issue["labels"] = list(
+        dict.fromkeys(
+            str(label).strip().lower()
+            for label in labels
+            if isinstance(label, str) and label.strip()
+        )
+    )
+    normalized_blockers: list[dict[str, Any]] = []
+    raw_blockers = payload.get("blocked_by")
+    blockers = raw_blockers if isinstance(raw_blockers, list) else []
+    for raw_blocker in blockers:
+        if not isinstance(raw_blocker, dict):
+            continue
+        normalized_blockers.append(
+            {
+                "id": raw_blocker.get("id"),
+                "identifier": raw_blocker.get("identifier"),
+                "state": _state(raw_blocker.get("state")) or None,
+            }
+        )
+    issue["blocked_by"] = normalized_blockers
+    unresolved_blocker = any(
+        blocker["state"] not in config.terminal_states
+        for blocker in normalized_blockers
+    )
+    issue["dispatchable"] = payload.get("dispatchable") is True and not unresolved_blocker
+    return issue
+
+
+def _issue_routable(issue: dict[str, Any], config: TrackerConfig) -> bool:
+    labels = set(issue.get("labels") or [])
+    return issue.get("dispatchable") is True and set(config.required_labels) <= labels

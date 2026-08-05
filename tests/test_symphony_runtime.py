@@ -19,8 +19,38 @@ class FakeTracker:
     async def terminal_issues(self) -> list[dict[str, Any]]:
         return self.terminal
 
+    async def fetch_issues_by_states(
+        self, state_names: list[str]
+    ) -> list[dict[str, Any]]:
+        states = {state.lower() for state in state_names}
+        return [
+            {
+                **issue,
+                "identifier": issue.get("identifier", issue["id"]),
+                "state": str(issue.get("state") or issue.get("status") or "").lower(),
+                "labels": issue.get("labels", []),
+                "dispatchable": issue.get("dispatchable", True),
+            }
+            for issue in self.terminal
+            if str(issue.get("state") or issue.get("status") or "").lower() in states
+        ]
+
     async def issues_by_ids(self, issue_ids: list[str]) -> list[dict[str, Any]]:
         return [issue for issue in self.terminal if issue["id"] in issue_ids]
+
+    async def fetch_issues_by_ids(
+        self, issue_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                **issue,
+                "identifier": issue.get("identifier", issue["id"]),
+                "state": str(issue.get("state") or issue.get("status") or "").lower(),
+                "labels": issue.get("labels", []),
+                "dispatchable": issue.get("dispatchable", True),
+            }
+            for issue in await self.issues_by_ids(issue_ids)
+        ]
 
 
 class FakeSkills:
@@ -174,6 +204,7 @@ async def test_reconciliation_stops_terminal_run_and_cleans_workspace(
         workspace_manager=workspaces,  # type: ignore[arg-type]
         skill_manager=skills,  # type: ignore[arg-type]
         started_at=time.monotonic(),
+        scheduling_state="ready",
     )
     entry.task = asyncio.create_task(asyncio.sleep(60))  # type: ignore[assignment]
     symphony._running[lease.id] = entry
@@ -198,9 +229,10 @@ async def test_workflow_hot_reload_keeps_last_known_good_on_invalid_edit(
     )
     workflow_path.write_text(source, encoding="utf-8")
     workflow = load_workflow(workflow_path)
+    tracker = FakeTracker(workflow.tracker)
     symphony = WindowsSymphony(
         workflow,
-        tracker=FakeTracker(workflow.tracker),  # type: ignore[arg-type]
+        tracker=tracker,  # type: ignore[arg-type]
         skill_manager=FakeSkills(),  # type: ignore[arg-type]
         workspace_manager=FakeWorkspaces(),  # type: ignore[arg-type]
     )
@@ -212,7 +244,19 @@ async def test_workflow_hot_reload_keeps_last_known_good_on_invalid_edit(
     assert symphony.workflow.polling_interval_ms == 5100
     assert symphony.workflow_error is None
 
+    workflow_path.write_text(
+        source.replace("interval_ms: 5000", "interval_ms: 5200").replace(
+            "required_labels: []", "required_labels: [Backend]"
+        ),
+        encoding="utf-8",
+    )
+    symphony._running["sentinel"] = object()  # type: ignore[assignment]
+    assert await symphony._reload_workflow_if_changed() is True
+    assert symphony.workflow.tracker.required_labels == ("backend",)
+    assert tracker.config.required_labels == ("backend",)
+    symphony._running.clear()
+
     workflow_path.write_text("not a workflow", encoding="utf-8")
     assert await symphony._reload_workflow_if_changed() is False
-    assert symphony.workflow.polling_interval_ms == 5100
+    assert symphony.workflow.polling_interval_ms == 5200
     assert symphony.workflow_error is not None

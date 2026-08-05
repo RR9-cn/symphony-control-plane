@@ -133,3 +133,40 @@ async def test_tracker_refreshes_active_claim_and_lists_terminal_issues(api):
         assert [row["id"] for row in await tracker.terminal_issues()] == ["ISSUE-001"]
     finally:
         await tracker.close()
+
+
+async def test_tracker_adapter_fetches_and_normalizes_issues_by_state_and_id(api):
+    payload = issue_payload()
+    payload.update(
+        {
+            "identifier": "TEAM-9",
+            "labels": ["Backend", "API"],
+            "blocked_by": [{"identifier": "TEAM-8", "state": "running"}],
+            "dispatchable": True,
+        }
+    )
+    assert (await api.post("/api/issues", json=payload)).status_code == 201
+    tracker = _tracker(api)
+    try:
+        by_state = await tracker.fetch_issues_by_states(["ready"])
+        assert len(by_state) == 1
+        issue = by_state[0]
+        assert issue["identifier"] == "TEAM-9"
+        assert issue["state"] == "ready"
+        assert issue["labels"] == ["backend", "api"]
+        assert issue["blocked_by"] == [
+            {"id": None, "identifier": "TEAM-8", "state": "running"}
+        ]
+        assert issue["dispatchable"] is False
+        assert (await tracker.fetch_issues_by_ids(["ISSUE-001"]))[0]["id"] == "ISSUE-001"
+    finally:
+        await tracker.close()
+
+
+async def test_tracker_adapter_skips_provider_request_for_empty_filters(api):
+    tracker = _tracker(api)
+    try:
+        assert await tracker.fetch_issues_by_states([]) == []
+        assert await tracker.fetch_issues_by_ids([]) == []
+    finally:
+        await tracker.close()

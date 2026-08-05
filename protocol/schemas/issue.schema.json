@@ -6,7 +6,8 @@
   "additionalProperties": false,
   "required": ["id", "title", "description", "priority", "repository", "acceptance_criteria"],
   "properties": {
-    "id": {"type": "string", "pattern": "^ISSUE-[0-9]{3,}$"},
+    "id": {"type": "string", "minLength": 1, "maxLength": 64},
+    "identifier": {"type": "string", "minLength": 1, "maxLength": 128},
     "title": {"type": "string", "minLength": 1, "maxLength": 200},
     "description": {"type": "string", "minLength": 1},
     "priority": {"type": "integer", "minimum": 0, "maximum": 4},
@@ -25,6 +26,24 @@
       "minItems": 1,
       "uniqueItems": true,
       "items": {"type": "string", "minLength": 1}
-    }
+    },
+    "url": {"type": ["string", "null"], "maxLength": 2000},
+    "assignee_id": {"type": ["string", "null"], "maxLength": 255},
+    "labels": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "blocked_by": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": ["string", "null"]},
+          "identifier": {"type": ["string", "null"]},
+          "state": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "native_ref": {"type": ["object", "null"]},
+    "dispatchable": {"type": "boolean"},
+    "branch_name": {"type": ["string", "null"], "maxLength": 255}
   }
 }

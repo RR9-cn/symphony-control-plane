@@ -101,6 +101,13 @@ class ControlPlaneService:
         async with self.session.begin():
             if await self.session.get(Issue, command.id):
                 raise ConflictError(f"issue already exists: {command.id}")
+            existing_identifier = await self.session.scalar(
+                select(Issue.id).where(Issue.identifier == command.identifier)
+            )
+            if existing_identifier is not None:
+                raise ConflictError(
+                    f"issue identifier already exists: {command.identifier}"
+                )
             issue = Issue(
                 **command.model_dump(), status="ready", version=1,
             )
@@ -137,9 +144,41 @@ class ControlPlaneService:
             issue = await self._require_issue(issue_id)
             if issue.version != command.expected_version:
                 raise ConflictError("issue version changed")
-            if issue.status not in {"ready", "blocked", "needs_human", "reviewing"}:
-                raise ConflictError(f"issue cannot be edited while status={issue.status}")
             values = command.model_dump(exclude={"expected_version"}, exclude_none=True)
+            routing_fields = {
+                "url",
+                "assignee_id",
+                "labels",
+                "blocked_by",
+                "native_ref",
+                "dispatchable",
+                "branch_name",
+            }
+            if issue.status == "running" and not set(values) <= routing_fields:
+                raise ConflictError(
+                    "only routing metadata can be edited while an Issue is running"
+                )
+            if issue.status not in {
+                "ready",
+                "running",
+                "blocked",
+                "needs_human",
+                "reviewing",
+            }:
+                raise ConflictError(f"issue cannot be edited while status={issue.status}")
+            if "identifier" in values and issue.status != "ready":
+                raise ConflictError("issue identifier can only be changed while ready")
+            identifier = values.get("identifier")
+            if identifier is not None:
+                existing_identifier = await self.session.scalar(
+                    select(Issue.id).where(
+                        Issue.identifier == identifier, Issue.id != issue_id
+                    )
+                )
+                if existing_identifier is not None:
+                    raise ConflictError(
+                        f"issue identifier already exists: {identifier}"
+                    )
             for key, value in values.items():
                 setattr(issue, key, value)
             issue.version += 1
@@ -512,9 +551,14 @@ class ControlPlaneService:
     async def _issue_view(self, issue: Issue) -> IssueView:
         artifacts = (await self.session.scalars(select(IssueArtifact).where(IssueArtifact.issue_id == issue.id).order_by(IssueArtifact.created_at))).all()
         return IssueView(
-            id=issue.id, title=issue.title, description=issue.description, status=issue.status,
+            id=issue.id, identifier=issue.identifier, title=issue.title,
+            description=issue.description, state=issue.status, status=issue.status,
             priority=issue.priority, version=issue.version, repository=issue.repository,
-            acceptance_criteria=issue.acceptance_criteria, blocker=issue.blocker,
+            acceptance_criteria=issue.acceptance_criteria, url=issue.url,
+            assignee_id=issue.assignee_id, labels=issue.labels,
+            blocked_by=issue.blocked_by, native_ref=issue.native_ref,
+            dispatchable=issue.dispatchable, branch_name=issue.branch_name,
+            blocker=issue.blocker,
             claim=ClaimView(worker_id=issue.claim_worker_id, expires_at=issue.claim_expires_at),
             retry_at=issue.retry_at, head_branch=issue.head_branch, local_commit=issue.local_commit,
             pull_request=issue.pull_request, merged_at=issue.merged_at,

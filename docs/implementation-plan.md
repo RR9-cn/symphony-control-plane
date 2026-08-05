@@ -57,7 +57,7 @@ Turn 是 Attempt 内部事件，不驱动宏观状态来回切换。
 
 ## 4. 已完成
 
-- [x] SQLite v2 单一基线迁移与 Issue 数据模型；
+- [x] SQLite v2 基线、增量迁移与标准化 Issue 数据模型；
 - [x] Issue CRUD、Candidates、原子 Claim、Lease、Heartbeat、Retry；
 - [x] Attempt、Thread、Turn Count 与结构化执行事件；
 - [x] 人工决策、Artifact 与完整审计事件；
@@ -71,13 +71,16 @@ Turn 是 Attempt 内部事件，不驱动宏观状态来回切换。
 - [x] Workspace 启动清理与 `before_remove` 生命周期 Hook；
 - [x] Turn 间重新确认 Claim，`turn_timeout_ms` 按消息静默时间重置；
 - [x] `WORKFLOW.md` 热更新、运行中配置快照和 Last-Known-Good 回退；
+- [x] Tracker Adapter 标准读取内核：按状态读取与按 ID 刷新；
+- [x] `identifier`、`labels`、`blocked_by`、`native_ref`、`dispatchable` 标准化；
+- [x] `required_labels`、活动/终态配置和按状态并发调度；
 - [x] 新协议、脚本和自动化回归测试。
 
 ## 5. 后续任务
 
 1. Workspace Retention：支持按保留期延迟清理终态 Issue，并把清理结果登记为审计事件。
 2. 运行指标：Token、Rate Limit、Turn Count、耗时和错误聚合。
-3. Tracker 标准兼容层：在不恢复本地 WorkItem 模型的前提下，适配标准 Issue Tracker/CLI/API。
+3. 扩展 Tracker Provider：在现有 Control Plane Adapter 之外按需接入 Linear、GitHub 等 Provider。
 
 这些任务不能重新引入固定生命周期或阶段角色；它们都应围绕 `Issue → Agent Session → Workspace` 的 Symphony 调度模型扩展。
 

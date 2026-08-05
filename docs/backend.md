@@ -4,7 +4,7 @@
 
 ## 数据模型
 
-- `issues`：需求、不可变仓库起点、状态、Claim、重试和交付信息；
+- `issues`：标准化 Issue 标识、标签、阻塞关系、调度资格、不可变仓库起点、Claim、重试和交付信息；
 - `issue_events`：生命周期审计；
 - `issue_artifacts`：可选的仓库相对产物登记；
 - `agent_attempts`：每次 Claim 的配置快照、Thread、最新 Turn 和 Turn Count；
@@ -41,6 +41,8 @@ POST /api/maintenance/tick
 ```
 
 Claim 使用版本号做原子 compare-and-set。Claim Token 只在成功领取时返回一次；普通查询只暴露 Worker 和到期时间。Lease 过期后进入 `retry_queued`，维护任务到期后重新置为 `ready`。
+
+`GET /api/issues?state=ready&state=running` 和 `GET /api/issues?id=...` 构成 Control Plane Tracker Adapter 的标准读取内核。API 同时返回 `identifier`、`state`、`labels`、`blocked_by`、`native_ref`、`dispatchable` 等 Symphony 标准化字段。
 
 ## 生命周期
 

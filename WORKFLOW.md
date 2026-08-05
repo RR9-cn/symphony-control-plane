@@ -1,6 +1,13 @@
 ---
 tracker:
   kind: fshows_control_plane
+  required_labels: []
+  active_states:
+    - ready
+    - running
+  terminal_states:
+    - done
+    - cancelled
   provider:
     endpoint: http://127.0.0.1:8080
     token: $CONTROL_PLANE_TOKEN
@@ -48,6 +55,7 @@ skill_repository:
 
 agent:
   max_concurrent_agents: 4
+  max_concurrent_agents_by_state: {}
   max_retry_backoff_ms: 300000
   max_turns: 30
   sandbox: danger-full-access

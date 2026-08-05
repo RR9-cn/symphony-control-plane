@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from symphony_windows.tracker import ClaimLease, ControlPlaneTracker
+from symphony_windows.tracker import ClaimLease, TrackerAdapter
 from symphony_windows.workflow import CodexConfig
 
 
@@ -56,7 +56,7 @@ class CodexAppServer:
         workspace: Path,
         prompt: str,
         issue: dict[str, Any],
-        tracker: ControlPlaneTracker,
+        tracker: TrackerAdapter,
         lease: ClaimLease,
         resume_thread_id: str | None = None,
         max_turns: int = 1,
@@ -228,7 +228,7 @@ class CodexAppServer:
     async def _open_thread(
         self,
         workspace: Path,
-        tracker: ControlPlaneTracker,
+        tracker: TrackerAdapter,
         *,
         resume_thread_id: str | None,
     ) -> str:
@@ -305,7 +305,7 @@ class CodexAppServer:
 
     async def _receive_turn(
         self,
-        tracker: ControlPlaneTracker,
+        tracker: TrackerAdapter,
         lease: ClaimLease,
         thread_id: str,
     ) -> str:

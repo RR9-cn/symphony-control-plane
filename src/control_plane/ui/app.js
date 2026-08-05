@@ -96,9 +96,12 @@ async function resolveHead() {
 
 function issuePayload() {
   const data = new FormData(dom.issueForm);
+  const labels = String(data.get("labels") || "").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean);
+  const blockedBy = String(data.get("blocked_by") || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => { const [identifier, blockerState] = line.split("|", 2).map((value) => value.trim()); return { identifier, state: blockerState || null }; });
   return {
     id: String(data.get("id") || "").trim().toUpperCase(), title: String(data.get("title") || "").trim(), description: String(data.get("description") || "").trim(),
     priority: Number(data.get("priority") || 2),
+    labels, blocked_by: blockedBy, dispatchable: data.get("dispatchable") === "true",
     repository: { url: String(data.get("repository_url") || "").trim(), base_branch: String(data.get("base_branch") || "").trim(), commit: String(data.get("commit") || "").trim().toLowerCase() },
     acceptance_criteria: String(data.get("acceptance_criteria") || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
   };
@@ -117,9 +120,11 @@ async function openDetail(issueId, show = true) {
       <div class="detail-field"><span>Status</span><strong>${escapeHtml(STATUS[issue.status] || issue.status)}</strong></div><div class="detail-field"><span>Priority</span><strong>P${issue.priority}</strong></div>
       <div class="detail-field"><span>Workspace base</span><strong>${escapeHtml(issue.repository.base_branch)}</strong></div><div class="detail-field"><span>Starting commit</span><strong>${escapeHtml(short(issue.repository.commit, 16))}</strong></div>
       <div class="detail-field"><span>Worker</span><strong>${escapeHtml(issue.claim.worker_id || "—")}</strong></div><div class="detail-field"><span>Thread / Turn</span><strong>${escapeHtml(latest ? `${short(latest.thread_id, 12)} / ${latest.turn_count}` : "—")}</strong></div>
+      <div class="detail-field"><span>Dispatchable</span><strong>${issue.dispatchable ? "Yes" : "No"}</strong></div><div class="detail-field"><span>Labels</span><strong>${escapeHtml(issue.labels.join(", ") || "—")}</strong></div>
     </div>
     <section class="section"><h3>验收标准</h3><ul>${issue.acceptance_criteria.map((value) => `<li>${escapeHtml(value)}</li>`).join("")}</ul></section>
     ${issue.blocker ? `<section class="section"><h3>Blocker</h3><pre>${escapeHtml(JSON.stringify(issue.blocker, null, 2))}</pre></section>` : ""}
+    ${issue.blocked_by.length ? `<section class="section"><h3>Blocked By</h3><pre>${escapeHtml(JSON.stringify(issue.blocked_by, null, 2))}</pre></section>` : ""}
     ${renderDecisions(decisions)}
     <section class="section"><h3>Attempts</h3>${attempts.length ? attempts.map((attempt) => `<article class="attempt"><strong>Attempt #${attempt.attempt_number} · ${escapeHtml(attempt.status)}</strong><div class="meta"><span>Turn ${attempt.turn_count}</span><span>${escapeHtml(short(attempt.thread_id, 16))}</span><span>${escapeHtml(attempt.worker_id)}</span></div></article>`).join("") : '<p class="modal-copy">尚未执行</p>'}</section>
     <section class="section"><h3>事件</h3><div class="timeline">${events.map((event) => `<article><strong>${escapeHtml(event.event)}</strong><small> · ${new Date(event.created_at).toLocaleString()}</small><div class="meta"><span>${escapeHtml(event.from_status || "—")} → ${escapeHtml(event.to_status || "—")}</span><span>${escapeHtml(event.actor_type)}</span></div></article>`).join("")}</div></section>`;

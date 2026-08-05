@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import JSON, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -55,9 +55,11 @@ class Issue(Base):
         ),
         Index("ix_issues_candidate_order", "status", "priority", "created_at"),
         Index("ix_issues_expired_claims", "status", "claim_expires_at"),
+        UniqueConstraint("identifier", name="uq_issues_identifier"),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    identifier: Mapped[str] = mapped_column(String(128))
     title: Mapped[str] = mapped_column(String(200))
     description: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(32), default="ready")
@@ -65,6 +67,13 @@ class Issue(Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
     repository: Mapped[dict[str, Any]] = mapped_column(JSON_VALUE)
     acceptance_criteria: Mapped[list[str]] = mapped_column(JSON_VALUE)
+    url: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    assignee_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    labels: Mapped[list[str]] = mapped_column(JSON_VALUE, default=list)
+    blocked_by: Mapped[list[dict[str, Any]]] = mapped_column(JSON_VALUE, default=list)
+    native_ref: Mapped[dict[str, Any] | None] = mapped_column(JSON_VALUE, nullable=True)
+    dispatchable: Mapped[bool] = mapped_column(Boolean, default=True)
+    branch_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     blocker: Mapped[dict[str, Any] | None] = mapped_column(JSON_VALUE, nullable=True)
     claim_worker_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     claim_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)

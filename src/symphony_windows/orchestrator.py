@@ -5,6 +5,7 @@ import contextlib
 import json
 import logging
 import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -12,7 +13,13 @@ from typing import Any, Callable
 from symphony_windows.attempt_events import normalize_codex_event
 from symphony_windows.codex import CodexAppServer, CodexError, CodexRunResult
 from symphony_windows.skill import SkillManager
-from symphony_windows.tracker import ClaimConflict, ClaimLease, ControlPlaneTracker, TrackerError
+from symphony_windows.tracker import (
+    ClaimConflict,
+    ClaimLease,
+    TrackerAdapter,
+    TrackerError,
+    create_tracker_adapter,
+)
 from symphony_windows.workflow import Workflow, WorkflowError, load_workflow
 from symphony_windows.workspace import WorkspaceError, WorkspaceManager
 
@@ -34,10 +41,11 @@ class RunningEntry:
     issue: dict[str, Any]
     lease: ClaimLease
     workflow: Workflow
-    tracker: ControlPlaneTracker
+    tracker: TrackerAdapter
     workspace_manager: WorkspaceManager
     skill_manager: SkillManager
     started_at: float
+    scheduling_state: str
     task: asyncio.Task[AttemptOutcome] | None = None
     last_event_at: float | None = None
     cancel_reason: str | None = None
@@ -55,13 +63,13 @@ class WindowsSymphony:
         self,
         workflow: Workflow,
         *,
-        tracker: ControlPlaneTracker | None = None,
+        tracker: TrackerAdapter | None = None,
         workspace_manager: WorkspaceManager | None = None,
         skill_manager: SkillManager | None = None,
         codex_factory: CodexFactory = CodexAppServer,
     ) -> None:
         self.workflow = workflow
-        self.tracker = tracker or ControlPlaneTracker(workflow.tracker)
+        self.tracker = tracker or create_tracker_adapter(workflow.tracker)
         self.workspace_manager = workspace_manager or WorkspaceManager(workflow.workspace)
         self.skill_manager = skill_manager or SkillManager(workflow.skill_repository, workflow.agent)
         self.codex_factory = codex_factory
@@ -96,9 +104,9 @@ class WindowsSymphony:
         await self._ensure_initialized()
         await self._register_worker()
         self._reap_finished()
-        await self._heartbeat_worker()
         await self._reconcile_running()
         self._reap_finished()
+        await self._heartbeat_worker()
         if self._stop_requested:
             return []
         # Reconciliation deliberately runs before reload/preflight. A broken
@@ -110,14 +118,26 @@ class WindowsSymphony:
         available = self.workflow.agent.max_concurrent_agents - len(self._running)
         if available <= 0:
             return []
-        candidates = await self.tracker.candidates(limit=max(available * 4, available))
+        candidates = await self.tracker.fetch_issues_by_states(
+            list(self.workflow.tracker.active_states)
+        )
         candidates.sort(key=_dispatch_key)
+        running_by_state = Counter(
+            entry.scheduling_state for entry in self._running.values()
+        )
         dispatched: list[str] = []
         for issue in candidates:
             if len(dispatched) >= available:
                 break
             issue_id = str(issue.get("id", ""))
-            if not issue_id or issue_id in self._running:
+            if not issue_dispatch_eligible(issue, self.workflow):
+                continue
+            if issue_id in self._running:
+                continue
+            scheduling_state = _state(issue.get("state"))
+            if not state_concurrency_available(
+                scheduling_state, running_by_state[scheduling_state], self.workflow
+            ):
                 continue
             try:
                 lease = await self.tracker.claim(issue, self.skill_manager.snapshot())
@@ -131,11 +151,13 @@ class WindowsSymphony:
                 workspace_manager=self.workspace_manager,
                 skill_manager=self.skill_manager,
                 started_at=time.monotonic(),
+                scheduling_state=scheduling_state,
             )
             entry.task = asyncio.create_task(
                 self._run_claimed(entry), name=f"windows-symphony-{issue_id}"
             )
             self._running[issue_id] = entry
+            running_by_state[scheduling_state] += 1
             dispatched.append(issue_id)
             logger.info(
                 "issue_id=%s issue_identifier=%s action=dispatch outcome=started",
@@ -193,7 +215,13 @@ class WindowsSymphony:
             entry.skill_manager.install(workspace)
             skills_installed = True
             await entry.workspace_manager.before_run(issue, workspace)
-            prompt = entry.workflow.render_prompt(issue, lease.attempt.get("attempt_number"))
+            attempt_number = lease.attempt.get("attempt_number")
+            attempt = (
+                attempt_number - 1
+                if isinstance(attempt_number, int) and attempt_number > 1
+                else None
+            )
+            prompt = entry.workflow.render_prompt(issue, attempt)
             if lease.resume_thread_id:
                 prompt = (
                     "Continue the existing Issue in this resumed Codex thread. "
@@ -333,13 +361,13 @@ class WindowsSymphony:
                 )
                 await self._cancel_entry(entry, "stall_timeout", cleanup=False)
 
-        grouped: dict[int, tuple[ControlPlaneTracker, list[RunningEntry]]] = {}
+        grouped: dict[int, tuple[TrackerAdapter, list[RunningEntry]]] = {}
         for entry in self._running.values():
             key = id(entry.tracker)
             grouped.setdefault(key, (entry.tracker, []))[1].append(entry)
         for tracker, entries in grouped.values():
             try:
-                refreshed = await tracker.issues_by_ids(
+                refreshed = await tracker.fetch_issues_by_ids(
                     [entry.issue_id for entry in entries]
                 )
             except TrackerError:
@@ -356,13 +384,21 @@ class WindowsSymphony:
                     continue
                 entry.issue = _normalize_issue(issue)
                 entry.lease.issue = issue
-                status = str(issue.get("status", ""))
-                if status in {"done", "cancelled"}:
+                state = _state(issue.get("state"))
+                effective_workflow = (
+                    self.workflow if entry.tracker is self.tracker else entry.workflow
+                )
+                if state in effective_workflow.tracker.terminal_states:
                     entry.lease.active = False
                     await self._cancel_entry(entry, "issue_terminal", cleanup=True)
-                elif status != "running":
+                elif (
+                    state not in effective_workflow.tracker.active_states
+                    or not issue_routable(issue, effective_workflow)
+                ):
                     entry.lease.active = False
-                    await self._cancel_entry(entry, "issue_no_longer_running", cleanup=False)
+                    await self._cancel_entry(
+                        entry, "issue_no_longer_routable", cleanup=False
+                    )
 
     async def _cancel_entry(
         self, entry: RunningEntry, reason: str, *, cleanup: bool
@@ -388,7 +424,9 @@ class WindowsSymphony:
             return
         await self.skill_manager.initialize()
         try:
-            terminal = await self.tracker.terminal_issues()
+            terminal = await self.tracker.fetch_issues_by_states(
+                list(self.workflow.tracker.terminal_states)
+            )
         except TrackerError:
             logger.warning("action=startup_cleanup outcome=tracker_fetch_failed", exc_info=True)
         else:
@@ -401,23 +439,30 @@ class WindowsSymphony:
         signature = _file_signature(self.workflow.path)
         if signature == self._workflow_signature and self._last_workflow_error is None:
             return True
-        candidate_tracker: ControlPlaneTracker | None = None
+        candidate_tracker: TrackerAdapter | None = None
         created_tracker = False
+        update_tracker_config = False
         try:
             candidate = load_workflow(self.workflow.path)
-            if candidate.tracker != self.workflow.tracker and self._running:
+            provider_changed = _tracker_provider_identity(
+                candidate.tracker
+            ) != _tracker_provider_identity(self.workflow.tracker)
+            if provider_changed and self._running:
                 raise WorkflowError(
-                    "tracker settings changed while Issues are running; reload is deferred until they finish"
+                    "tracker provider changed while Issues are running; reload is deferred until they finish"
                 )
             candidate_tracker = self.tracker
             if candidate.tracker != self.workflow.tracker:
-                if self._tracker_injected:
-                    raise WorkflowError("injected tracker cannot be replaced by hot reload")
-                candidate_tracker = ControlPlaneTracker(candidate.tracker)
-                created_tracker = True
-                await candidate_tracker.register_worker(
-                    capacity=candidate.agent.max_concurrent_agents
-                )
+                if provider_changed:
+                    if self._tracker_injected:
+                        raise WorkflowError("injected tracker cannot be replaced by hot reload")
+                    candidate_tracker = create_tracker_adapter(candidate.tracker)
+                    created_tracker = True
+                    await candidate_tracker.register_worker(
+                        capacity=candidate.agent.max_concurrent_agents
+                    )
+                else:
+                    update_tracker_config = True
             candidate_skill_manager = self.skill_manager
             if not self._skill_injected:
                 candidate_skill_manager = SkillManager(
@@ -441,6 +486,8 @@ class WindowsSymphony:
         tracker_changed = candidate_tracker is not previous_tracker
         self.workflow = candidate
         self.tracker = candidate_tracker
+        if update_tracker_config:
+            self.tracker.config = candidate.tracker
         self.skill_manager = candidate_skill_manager
         self.workspace_manager = candidate_workspace_manager
         self._workflow_signature = signature
@@ -526,6 +573,58 @@ def _dispatch_key(issue: dict[str, Any]) -> tuple[int, str, str]:
     rank = priority if isinstance(priority, int) and 1 <= priority <= 4 else 5
     return rank, str(issue.get("created_at", "")), str(
         issue.get("identifier") or issue.get("id", "")
+    )
+
+
+def issue_routable(issue: dict[str, Any], workflow: Workflow) -> bool:
+    labels = {
+        str(label).strip().lower()
+        for label in issue.get("labels", [])
+        if isinstance(label, str) and label.strip()
+    }
+    return (
+        issue.get("dispatchable") is True
+        and set(workflow.tracker.required_labels) <= labels
+    )
+
+
+def issue_dispatch_eligible(issue: dict[str, Any], workflow: Workflow) -> bool:
+    required = ("id", "identifier", "title", "state")
+    if any(
+        not isinstance(issue.get(field), str) or not issue[field].strip()
+        for field in required
+    ):
+        return False
+    state = _state(issue["state"])
+    return (
+        state in workflow.tracker.active_states
+        and state not in workflow.tracker.terminal_states
+        and issue_routable(issue, workflow)
+    )
+
+
+def state_concurrency_available(
+    state: str, running_count: int, workflow: Workflow
+) -> bool:
+    normalized = _state(state)
+    limit = workflow.agent.max_concurrent_agents_by_state.get(
+        normalized, workflow.agent.max_concurrent_agents
+    )
+    return running_count < limit
+
+
+def _state(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def _tracker_provider_identity(config: Any) -> tuple[object, ...]:
+    return (
+        config.kind,
+        config.endpoint,
+        config.token,
+        config.worker_id,
+        config.request_timeout_seconds,
+        config.secret_environment_names,
     )
 
 

@@ -22,6 +22,10 @@ class TrackerConfig:
     endpoint: str
     token: str
     worker_id: str
+    kind: str = "fshows_control_plane"
+    required_labels: tuple[str, ...] = ()
+    active_states: tuple[str, ...] = ("ready", "running")
+    terminal_states: tuple[str, ...] = ("done", "cancelled")
     lease_seconds: int = 300
     request_timeout_seconds: float = 30.0
     secret_environment_names: tuple[str, ...] = ("ACP_API_TOKEN", "CONTROL_PLANE_TOKEN")
@@ -67,7 +71,8 @@ class CodexConfig:
 
 @dataclass(frozen=True)
 class AgentConfig:
-    max_concurrent_agents: int = 4
+    max_concurrent_agents: int = 10
+    max_concurrent_agents_by_state: dict[str, int] = field(default_factory=dict)
     max_retry_backoff_ms: int = 300_000
     max_turns: int = 20
     skills: tuple[str, ...] = ()
@@ -85,6 +90,9 @@ class AgentConfig:
             "model": self.model,
             "effort": self.effort,
             "max_turns": self.max_turns,
+            "max_concurrent_agents_by_state": dict(
+                self.max_concurrent_agents_by_state
+            ),
         }
 
     def codex_config(self, base: CodexConfig) -> CodexConfig:
@@ -139,8 +147,29 @@ def load_workflow(path: str | Path) -> Workflow:
     if not token:
         raise WorkflowError("tracker provider token is required")
     worker_id = _resolve(provider.get("worker_id")) or os.getenv("SYMPHONY_WORKER_ID") or f"windows-{socket.gethostname()}-{os.getpid()}"
+    required_labels = _normalized_strings(
+        tracker_data.get("required_labels", []), "tracker.required_labels"
+    )
+    active_states = _normalized_strings(
+        tracker_data.get("active_states", ["ready", "running"]),
+        "tracker.active_states",
+    )
+    terminal_states = _normalized_strings(
+        tracker_data.get("terminal_states", ["done", "cancelled"]),
+        "tracker.terminal_states",
+    )
+    if not active_states:
+        raise WorkflowError("tracker.active_states must not be empty")
+    overlap = set(active_states) & set(terminal_states)
+    if overlap:
+        raise WorkflowError(
+            "tracker.active_states and tracker.terminal_states must be disjoint: "
+            + ", ".join(sorted(overlap))
+        )
     tracker = TrackerConfig(
-        endpoint=endpoint, token=token, worker_id=worker_id,
+        kind=str(tracker_data["kind"]), endpoint=endpoint, token=token, worker_id=worker_id,
+        required_labels=required_labels, active_states=active_states,
+        terminal_states=terminal_states,
         lease_seconds=_integer(provider.get("lease_seconds", 300), 10, 3600, "tracker.provider.lease_seconds"),
         request_timeout_seconds=_number(provider.get("request_timeout_seconds", 30), "tracker.provider.request_timeout_seconds"),
         secret_environment_names=tuple(sorted({"ACP_API_TOKEN", "CONTROL_PLANE_TOKEN", *(name for name in [token_env] if name)})),
@@ -172,7 +201,10 @@ def load_workflow(path: str | Path) -> Workflow:
     if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
         raise WorkflowError("agent.sandbox is invalid")
     agent = AgentConfig(
-        max_concurrent_agents=_integer(agent_data.get("max_concurrent_agents", 4), 1, 100, "agent.max_concurrent_agents"),
+        max_concurrent_agents=_integer(agent_data.get("max_concurrent_agents", 10), 1, 100, "agent.max_concurrent_agents"),
+        max_concurrent_agents_by_state=_state_limits(
+            agent_data.get("max_concurrent_agents_by_state", {})
+        ),
         max_retry_backoff_ms=_integer(agent_data.get("max_retry_backoff_ms", 300000), 1000, 86400000, "agent.max_retry_backoff_ms"),
         max_turns=_integer(agent_data.get("max_turns", 20), 1, 100, "agent.max_turns"),
         skills=skills, sandbox=sandbox,
@@ -280,6 +312,37 @@ def _strings(value: Any, name: str) -> tuple[str, ...]:
     result = tuple(item.strip() for item in value)
     if len(set(result)) != len(result):
         raise WorkflowError(f"{name} must be unique")
+    return result
+
+
+def _normalized_strings(value: Any, name: str) -> tuple[str, ...]:
+    values = _strings(value, name)
+    normalized = tuple(item.strip().lower() for item in values)
+    if len(set(normalized)) != len(normalized):
+        raise WorkflowError(f"{name} must be unique after normalization")
+    return normalized
+
+
+def _state_limits(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        raise WorkflowError("agent.max_concurrent_agents_by_state must be an object")
+    result: dict[str, int] = {}
+    for raw_state, raw_limit in value.items():
+        state = str(raw_state).strip().lower()
+        if not state:
+            raise WorkflowError(
+                "agent.max_concurrent_agents_by_state state names must not be blank"
+            )
+        if state in result:
+            raise WorkflowError(
+                "agent.max_concurrent_agents_by_state contains duplicate normalized states"
+            )
+        result[state] = _integer(
+            raw_limit,
+            1,
+            100,
+            f"agent.max_concurrent_agents_by_state.{raw_state}",
+        )
     return result
 
 
