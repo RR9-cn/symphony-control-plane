@@ -1,277 +1,78 @@
 <!doctype html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="dark" />
-    <meta name="theme-color" content="#0a0d12" />
-    <title>Fshows Agent Control Plane</title>
-    <link rel="stylesheet" href="/ui/assets/styles.css" />
-    <script src="/ui/assets/app.js" defer></script>
-  </head>
-  <body>
-    <div class="app-shell">
-      <header class="topbar">
-        <a class="brand" href="/" aria-label="返回控制面首页">
-          <span class="brand-mark" aria-hidden="true">
-            <span></span><span></span><span></span>
-          </span>
-          <span>
-            <strong>Fshows</strong>
-            <small>Agent Control Plane</small>
-          </span>
-        </a>
-
-        <div class="topbar-actions">
-          <div class="connection-pill" id="connection-pill" title="控制面连接状态">
-            <span class="status-dot"></span>
-            <span id="connection-label">正在连接</span>
-          </div>
-          <button class="button button-primary" id="new-issue-button" type="button">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-            录入 Issue
-          </button>
-          <button class="icon-button" id="refresh-button" type="button" title="立即刷新" aria-label="立即刷新">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-3M4 4v4h4M4 13a8.1 8.1 0 0 0 15.5 3M20 20v-4h-4"/></svg>
-          </button>
-          <button class="button button-secondary" id="token-button" type="button">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="3"/><path d="m10.5 12.5 7-7 2 2-1.5 1.5 1.5 1.5-2 2-1.5-1.5-3.5 3.5"/></svg>
-            API 凭据
-          </button>
-        </div>
-      </header>
-
-      <main class="workspace">
-        <aside class="feature-sidebar">
-          <div class="sidebar-heading">
-            <div>
-              <span class="eyebrow">Workspace</span>
-              <h1>研发任务</h1>
-            </div>
-            <span class="count-badge" id="feature-count">0</span>
-          </div>
-
-          <label class="search-box">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
-            <input id="feature-search" type="search" placeholder="搜索 Feature" autocomplete="off" />
-          </label>
-
-          <nav class="feature-list" id="feature-list" aria-label="Feature 列表">
-            <div class="skeleton feature-skeleton"></div>
-            <div class="skeleton feature-skeleton"></div>
-            <div class="skeleton feature-skeleton"></div>
-          </nav>
-
-          <div class="sidebar-footer">
-            <span>自动刷新</span>
-            <strong><span class="live-dot"></span> 5 秒</strong>
-          </div>
-        </aside>
-
-        <section class="dashboard">
-          <div class="dashboard-header">
-            <div>
-              <div class="breadcrumb"><span>Features</span><span>/</span><strong id="feature-id">全部</strong></div>
-              <h2 id="feature-title">任务总览</h2>
-              <p id="feature-description">查看 Agent 执行状态、交接产物和人工决策。</p>
-            </div>
-            <div class="view-controls">
-              <div class="feature-delivery" id="feature-delivery" hidden>
-                <span id="feature-delivery-status"></span>
-                <button class="button button-primary" id="feature-publish-button" type="button" hidden>授权 Push / 创建 PR</button>
-                <button class="button button-primary" id="feature-merge-button" type="button" hidden>确认 PR 已合并</button>
-              </div>
-              <label class="compact-search">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
-                <input id="work-item-search" type="search" placeholder="搜索工作项" autocomplete="off" />
-              </label>
-              <select id="role-filter" aria-label="按 Agent 角色筛选">
-                <option value="">全部角色</option>
-                <option value="solution_architect">Solution Architect</option>
-                <option value="backend_builder">Backend Builder</option>
-                <option value="code_reviewer">Code Reviewer</option>
-                <option value="test_designer">Test Designer</option>
-                <option value="test_executor">Test Executor</option>
-              </select>
-            </div>
-          </div>
-
-          <section class="metrics" aria-label="任务指标">
-            <article class="metric-card">
-              <span class="metric-icon metric-total"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 9h8M8 13h5"/></svg></span>
-              <div><strong id="metric-total">—</strong><span>工作项总数</span></div>
-              <small id="metric-completion">等待数据</small>
-            </article>
-            <article class="metric-card">
-              <span class="metric-icon metric-running"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7Z"/></svg></span>
-              <div><strong id="metric-running">—</strong><span>正在执行</span></div>
-              <small id="metric-workers">0 个 Worker</small>
-            </article>
-            <article class="metric-card">
-              <span class="metric-icon metric-human"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M5 21a7 7 0 0 1 14 0"/></svg></span>
-              <div><strong id="metric-human">—</strong><span>等待人工</span></div>
-              <small>需要处理</small>
-            </article>
-            <article class="metric-card">
-              <span class="metric-icon metric-risk"><svg viewBox="0 0 24 24"><path d="M12 3 2.8 19h18.4Z"/><path d="M12 9v4M12 17h.01"/></svg></span>
-              <div><strong id="metric-risk">—</strong><span>阻塞 / 返工</span></div>
-              <small id="metric-retry">0 个重试</small>
-            </article>
-          </section>
-
-          <section class="agent-panel" aria-label="Agent 运行状态">
-            <div class="section-heading agent-panel-heading">
-              <div>
-                <span class="eyebrow">Agent runtime</span>
-                <h3>Agent 状态中心</h3>
-              </div>
-              <div class="runner-controls">
-                <span class="runner-state" id="runner-state"><span class="status-dot"></span><strong>Runner 未启动</strong></span>
-                <button class="button button-secondary" id="runner-start-button" type="button">启动 Runner</button>
-                <button class="button button-ghost" id="runner-stop-button" type="button" disabled>停止</button>
-              </div>
-            </div>
-            <div class="worker-list" id="worker-list"></div>
-            <div class="agent-runtime-list" id="agent-runtime-list"></div>
-          </section>
-
-          <section class="board-panel">
-            <div class="section-heading">
-              <div>
-                <span class="eyebrow">Live workflow</span>
-                <h3>任务看板</h3>
-              </div>
-              <span class="last-updated" id="last-updated">尚未刷新</span>
-            </div>
-            <div class="board" id="board" aria-live="polite"></div>
-          </section>
-        </section>
-      </main>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fshows Symphony</title>
+  <link rel="stylesheet" href="/ui/assets/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">S</span><div><strong>Fshows Symphony</strong><small>Issue agent control plane</small></div></div>
+    <div class="top-actions">
+      <span class="connection" id="connection">连接中</span>
+      <button class="button ghost" id="token-button">认证</button>
+      <button class="button ghost" id="refresh-button">刷新</button>
+      <button class="button" id="new-issue-button">新建 Issue</button>
     </div>
+  </header>
 
-    <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
-    <aside class="detail-drawer" id="detail-drawer" aria-label="工作项详情" aria-hidden="true">
-      <div class="drawer-header">
-        <div>
-          <div class="drawer-kicker"><span id="drawer-id">WI-000</span><span id="drawer-status" class="status-chip">Draft</span></div>
-          <h2 id="drawer-title">工作项详情</h2>
-        </div>
-        <button class="icon-button" id="drawer-close" type="button" aria-label="关闭详情">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
-        </button>
+  <main class="shell">
+    <section class="hero">
+      <div><span class="eyebrow">SYMPHONY RUNTIME</span><h1>一个 Issue，一个持续工作的 Agent</h1><p>Agent 在同一个 Workspace 和 Thread 中完成分析、实现与验证；只有最终交付保留人工门禁。</p></div>
+      <div class="runner-card"><div><span>Managed Runner</span><strong id="runner-state">—</strong><small id="runner-detail">正在读取状态</small></div><button class="button secondary" id="runner-button">启动</button></div>
+    </section>
+
+    <section class="metrics">
+      <article><span>全部 Issue</span><strong id="metric-total">0</strong></article>
+      <article><span>Agent Running</span><strong id="metric-running">0</strong></article>
+      <article><span>等待人工</span><strong id="metric-human">0</strong></article>
+      <article><span>完成</span><strong id="metric-done">0</strong></article>
+    </section>
+
+    <section class="content-grid">
+      <aside class="panel runtime-panel">
+        <div class="panel-heading"><div><span class="eyebrow">LIVE AGENTS</span><h2>Agent 状态</h2></div><span id="runtime-count">0</span></div>
+        <div class="runtime-list" id="runtime-list"></div>
+      </aside>
+      <section class="panel issues-panel">
+        <div class="panel-heading"><div><span class="eyebrow">ISSUE TRACKER</span><h2>Issues</h2></div><input id="issue-search" placeholder="搜索 ID 或标题" /></div>
+        <div class="issue-list" id="issue-list"></div>
+      </section>
+    </section>
+  </main>
+
+  <dialog id="issue-modal" class="modal">
+    <form method="dialog" id="issue-form">
+      <div class="modal-heading"><div><span class="eyebrow">MANUAL INTAKE</span><h2>新建 Issue</h2></div><button class="icon-button" value="cancel">×</button></div>
+      <p class="modal-copy">创建后进入 Ready，由一个通用 Agent 负责完整分析、实现和测试。</p>
+      <div class="form-grid">
+        <label><span>Issue ID</span><input name="id" required pattern="ISSUE-[0-9]{3,}" /></label>
+        <label><span>优先级</span><select name="priority"><option value="0">P0</option><option value="1">P1</option><option value="2" selected>P2</option><option value="3">P3</option><option value="4">P4</option></select></label>
+        <label class="wide"><span>标题</span><input name="title" required maxlength="200" /></label>
+        <label class="wide"><span>描述</span><textarea name="description" required></textarea></label>
+        <label class="wide"><span>仓库本机绝对路径或 URL</span><input name="repository_url" required /></label>
+        <label><span>Base Branch</span><input name="base_branch" required value="master" /></label>
+        <label><span>不可变 Commit</span><div class="inline"><input name="commit" required pattern="[a-fA-F0-9]{40}" maxlength="40" /><button type="button" class="button ghost" id="resolve-head">读取 HEAD</button></div></label>
+        <label class="wide"><span>验收标准（每行一条）</span><textarea name="acceptance_criteria" required></textarea></label>
       </div>
-      <div class="drawer-tabs" role="tablist">
-        <button class="drawer-tab active" type="button" data-tab="overview">概览</button>
-        <button class="drawer-tab" type="button" data-tab="activity">时间线 <span id="event-count">0</span></button>
-        <button class="drawer-tab" type="button" data-tab="attempts">执行 <span id="attempt-count">0</span></button>
-        <button class="drawer-tab" type="button" data-tab="artifacts">产物 <span id="artifact-count">0</span></button>
-      </div>
-      <div class="drawer-content" id="drawer-content"></div>
-      <div class="drawer-actions" id="drawer-actions"></div>
-    </aside>
+      <div class="error" id="issue-error" hidden></div>
+      <div class="modal-actions"><button class="button ghost" value="cancel">取消</button><button class="button" value="create">创建并进入 Ready</button></div>
+    </form>
+  </dialog>
 
-    <dialog class="modal" id="token-modal">
-      <form method="dialog" id="token-form">
-        <div class="modal-icon"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="3"/><path d="m10.5 12.5 7-7 2 2-1.5 1.5 1.5 1.5-2 2-1.5-1.5-3.5 3.5"/></svg></div>
-        <div class="modal-copy">
-          <span class="eyebrow">Session credential</span>
-          <h2>连接控制面</h2>
-          <p>如果后端启用了 Bearer 认证，请输入 API Token。凭据仅保存在当前浏览器标签页。</p>
-        </div>
-        <label class="field">
-          <span>API Token</span>
-          <input id="token-input" type="password" placeholder="留空表示不使用认证" autocomplete="off" />
-        </label>
-        <div class="modal-actions">
-          <button class="button button-ghost" value="cancel" type="submit">取消</button>
-          <button class="button button-primary" id="token-save" value="default" type="submit">保存并连接</button>
-        </div>
-      </form>
-    </dialog>
+  <dialog id="detail-modal" class="modal detail-modal">
+    <div class="modal-heading"><div><span class="eyebrow" id="detail-id"></span><h2 id="detail-title"></h2></div><button class="icon-button" id="detail-close">×</button></div>
+    <div id="detail-content"></div>
+    <div class="error" id="detail-error" hidden></div>
+    <div class="modal-actions" id="detail-actions"></div>
+  </dialog>
 
-    <dialog class="modal action-modal" id="action-modal">
-      <form method="dialog" id="action-form">
-        <div class="modal-copy">
-          <span class="eyebrow" id="action-eyebrow">Human gate</span>
-          <h2 id="action-title">确认操作</h2>
-          <p id="action-description"></p>
-        </div>
-        <div id="action-fields"></div>
-        <div class="modal-error" id="action-error" hidden></div>
-        <div class="modal-actions">
-          <button class="button button-ghost" value="cancel" type="submit">取消</button>
-          <button class="button button-primary" id="action-confirm" value="default" type="submit">确认</button>
-        </div>
-      </form>
-    </dialog>
+  <dialog id="token-modal" class="modal small-modal">
+    <form method="dialog" id="token-form"><div class="modal-heading"><h2>API 认证</h2></div><label><span>Bearer Token</span><input type="password" id="token-input" /></label><div class="modal-actions"><button class="button ghost" value="cancel">取消</button><button class="button" value="save">保存</button></div></form>
+  </dialog>
 
-    <dialog class="modal issue-modal" id="issue-modal">
-      <form method="dialog" id="issue-form">
-        <div class="modal-copy">
-          <span class="eyebrow">Manual requirement intake</span>
-          <h2>手工录入 Issue</h2>
-          <p>录入需求和不可变代码基线，预览固定五阶段研发链路；确认后仅首个技术分析任务进入 Ready。</p>
-        </div>
-        <div class="issue-form-grid">
-          <label class="field">
-            <span>Feature ID</span>
-            <input name="feature_id" required pattern="FEATURE-[0-9]{3,}" placeholder="FEATURE-7001" autocomplete="off" />
-          </label>
-          <label class="field">
-            <span>优先级</span>
-            <select name="priority">
-              <option value="0">P0 · 紧急</option>
-              <option value="1">P1 · 高</option>
-              <option value="2" selected>P2 · 常规</option>
-              <option value="3">P3 · 低</option>
-              <option value="4">P4 · 待排期</option>
-            </select>
-          </label>
-          <label class="field issue-span-all">
-            <span>Issue 标题</span>
-            <input name="title" required maxlength="200" placeholder="例如：新增用户详情查询接口" autocomplete="off" />
-          </label>
-          <label class="field issue-span-all">
-            <span>需求描述</span>
-            <textarea name="description" required placeholder="说明目标、范围、关键业务规则和不做什么"></textarea>
-          </label>
-          <label class="field issue-span-all">
-            <span>仓库地址或本机绝对路径</span>
-            <input name="repository_url" required placeholder="D:\fws-repo-cache\project" autocomplete="off" />
-          </label>
-          <label class="field">
-            <span>Base Branch</span>
-            <input name="base_branch" required value="master" autocomplete="off" />
-          </label>
-          <label class="field">
-            <span>代码版本</span>
-            <div class="commit-input-row">
-              <input name="commit" pattern="[a-fA-F0-9]{40}" minlength="40" maxlength="40" placeholder="填写本地仓库后自动获取" autocomplete="off" />
-              <button class="button button-secondary commit-resolve-button" id="commit-resolve-button" type="button">读取 HEAD</button>
-            </div>
-            <small class="field-hint" id="commit-status">本地仓库自动读取；远程仓库可手工填写完整 40 位 Commit。</small>
-          </label>
-          <label class="field issue-span-all">
-            <span>验收标准（每行一条）</span>
-            <textarea name="acceptance_criteria" required placeholder="存在用户时返回用户详情&#10;用户不存在时返回明确业务错误"></textarea>
-          </label>
-        </div>
-        <section class="issue-preview" id="issue-preview" hidden>
-          <div class="issue-preview-heading">
-            <div><span class="eyebrow">Decomposition preview</span><h3>五阶段执行链</h3></div>
-            <span>确认后创建 5 个 WorkItem</span>
-          </div>
-          <div class="issue-preview-list" id="issue-preview-list"></div>
-        </section>
-        <div class="modal-error" id="issue-error" hidden></div>
-        <div class="modal-actions">
-          <button class="button button-ghost" value="cancel" type="submit">取消</button>
-          <button class="button button-secondary" id="issue-preview-button" value="preview" type="submit">生成拆分预览</button>
-          <button class="button button-primary" id="issue-create-button" value="create" type="submit" disabled>确认创建</button>
-        </div>
-      </form>
-    </dialog>
-
-    <div class="toast-region" id="toast-region" aria-live="polite"></div>
-  </body>
+  <div class="toast" id="toast" hidden></div>
+  <script src="/ui/assets/app.js" defer></script>
+</body>
 </html>

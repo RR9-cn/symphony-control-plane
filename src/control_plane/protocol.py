@@ -8,8 +8,7 @@ from typing import Any
 import yaml
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-PROTOCOL_ROOT = REPOSITORY_ROOT / "protocol"
+PROTOCOL_ROOT = Path(__file__).resolve().parents[2] / "protocol"
 
 
 @dataclass(frozen=True)
@@ -18,15 +17,12 @@ class Transition:
     to_status: str
     event: str
     actor: str
-    guards: tuple[str, ...]
-    effects: tuple[str, ...]
 
 
 @dataclass(frozen=True)
 class ProtocolDefinition:
     statuses: frozenset[str]
     terminal_statuses: frozenset[str]
-    roles: dict[str, dict[str, Any]]
     transitions: dict[tuple[str, str, str], Transition]
 
     def transition(self, from_status: str, to_status: str, event: str) -> Transition:
@@ -39,8 +35,7 @@ class ProtocolDefinition:
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
-        value = yaml.safe_load(handle)
+    value = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise RuntimeError(f"protocol file must contain a mapping: {path}")
     return value
@@ -49,25 +44,20 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 @lru_cache(maxsize=1)
 def get_protocol() -> ProtocolDefinition:
     machine = _load_yaml(PROTOCOL_ROOT / "state-machine.yaml")
-    roles = _load_yaml(PROTOCOL_ROOT / "agent-roles.yaml")["roles"]
-    transitions: dict[tuple[str, str, str], Transition] = {}
-    for item in machine["transitions"]:
-        transition = Transition(
+    transitions = {
+        (item["from"], item["to"], item["event"]): Transition(
             from_status=item["from"],
             to_status=item["to"],
             event=item["event"],
             actor=item["actor"],
-            guards=tuple(item.get("guards", [])),
-            effects=tuple(item.get("effects", [])),
         )
-        transitions[(transition.from_status, transition.to_status, transition.event)] = transition
+        for item in machine["transitions"]
+    }
     return ProtocolDefinition(
         statuses=frozenset(machine["statuses"]),
         terminal_statuses=frozenset(machine["terminal_statuses"]),
-        roles=roles,
         transitions=transitions,
     )
 
 
 PROTOCOL = get_protocol()
-ROLE_STAGE = {name: definition["stage"] for name, definition in PROTOCOL.roles.items()}

@@ -1,9 +1,0 @@
-scope:
-  included: [商品列表查询, 状态筛选, 稳定分页]
-  excluded: [商品编辑, 商品发布]
-core_flows: [商户分页查询商品]
-state_machines: []
-module_boundaries: [catalog-query]
-external_dependencies: []
-confirmed_decisions: [DEC-001]
-pending_decisions: []

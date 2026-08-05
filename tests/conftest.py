@@ -22,6 +22,7 @@ async def api(tmp_path: Path):
         database_url=f"sqlite+aiosqlite:///{(tmp_path / 'test.db').as_posix()}",
         enable_lease_sweeper=False,
         default_retry_delay_seconds=0,
+        issue_workspace_root=str(tmp_path / "workspaces"),
     )
     database = Database(settings)
     async with database.engine.begin() as connection:
@@ -40,6 +41,7 @@ async def authenticated_api(tmp_path: Path):
         database_url=f"sqlite+aiosqlite:///{(tmp_path / 'authenticated.db').as_posix()}",
         enable_lease_sweeper=False,
         api_token="integration-secret",
+        issue_workspace_root=str(tmp_path / "workspaces"),
     )
     database = Database(settings)
     async with database.engine.begin() as connection:
@@ -52,45 +54,25 @@ async def authenticated_api(tmp_path: Path):
     await database.dispose()
 
 
-def feature_payload() -> dict[str, object]:
+def issue_payload(issue_id: str = "ISSUE-001") -> dict[str, object]:
     return {
-        "id": "FEATURE-001",
-        "title": "Catalog list",
-        "description": "Backend control-plane fixture",
-    }
-
-
-def work_item_payload(
-    item_id: str,
-    *,
-    status: str = "draft",
-    dependencies: list[str] | None = None,
-) -> dict[str, object]:
-    role_by_id = {
-        "WI-001": ("tech_analysis", "solution_architect"),
-        "WI-002": ("implementation", "backend_builder"),
-        "WI-003": ("code_review", "code_reviewer"),
-    }
-    stage, role = role_by_id.get(item_id, ("implementation", "backend_builder"))
-    return {
-        "id": item_id,
-        "feature_id": "FEATURE-001",
-        "parent_id": None,
-        "title": f"Work item {item_id}",
-        "description": "Fixture work item",
-        "stage": stage,
-        "agent_role": role,
-        "status": status,
+        "id": issue_id,
+        "title": "Add user detail endpoint",
+        "description": "Implement and test an endpoint that returns one user.",
         "priority": 1,
         "repository": {
-            "url": "git@example.local:catalog.git",
+            "url": "https://github.com/example/catalog.git",
             "base_branch": "main",
-            "head_branch": None,
-            "commit": None,
-            "pull_request": None,
+            "commit": "1" * 40,
         },
-        "dependencies": dependencies or [],
-        "input_artifacts": [],
-        "output_artifacts": [],
-        "acceptance_criteria": ["fixture passes"],
+        "acceptance_criteria": ["Endpoint returns the requested user", "Tests pass"],
+    }
+
+
+def claim_payload(version: int = 1) -> dict[str, object]:
+    return {
+        "workerId": "windows-symphony-managed",
+        "expectedVersion": version,
+        "leaseSeconds": 300,
+        "agent": {"config": {"kind": "coding_agent", "skills": [], "max_turns": 20}},
     }

@@ -1,49 +1,12 @@
-schema_version: 1
-path_style: feature_relative_posix
-case_sensitive: true
-
+version: 2
+scope: issue_workspace
+path_style: repository_relative_posix
 rules:
-  - absolute_paths_forbidden
-  - parent_traversal_forbidden
-  - unlisted_aliases_forbidden
-
-artifacts:
-  prd_original:
-    path: prd/original.md
-    cardinality: one
-  prd_consensus:
-    path: analysis/prd-consensus.yaml
-    cardinality: one
-  ddl_design:
-    path: ddl/design.md
-    cardinality: zero_or_one
-  task_split:
-    path: task-split/task.md
-    cardinality: one
-  api_spec:
-    path: task-split/api-spec.md
-    cardinality: zero_or_one
-  decision_log:
-    path: task-split/decision-log.md
-    cardinality: one
-  tech_analysis:
-    path_pattern: tech-analysis/*.md
-    cardinality: one_or_more
-  review_report:
-    path_pattern: reviews/*/report.md
-    cardinality: zero_or_more
-  test_plan:
-    path_pattern: test/plans/*.md
-    cardinality: zero_or_more
-  test_result:
-    path_pattern: test/results/*.md
-    cardinality: zero_or_more
-  handoff:
-    path_pattern: orchestration/handoffs/*.yaml
-    cardinality: one_per_completed_attempt
-
-deprecated_aliases:
-  - ddl/ddl.md
-  - ddl/*-ddl.md
-  - task/*.md
-  - review/**
+  - paths must be relative to the persistent Issue workspace
+  - absolute paths, backslashes, empty segments, and parent traversal are forbidden
+  - artifacts are optional evidence and never represent lifecycle handoffs
+recommended_roots:
+  - docs/
+  - test/
+  - reports/
+  - artifacts/

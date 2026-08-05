@@ -14,7 +14,7 @@ from typing import Any
 import yaml
 
 from symphony_windows.workflow import (
-    AgentProfileConfig,
+    AgentConfig,
     SkillRepositoryConfig,
     WorkflowError,
 )
@@ -52,10 +52,10 @@ class SkillManager:
     def __init__(
         self,
         config: SkillRepositoryConfig,
-        profiles: tuple[AgentProfileConfig, ...],
+        agent: AgentConfig,
     ) -> None:
         self.config = config
-        self.profiles = profiles
+        self.agent = agent
         self._checkout: Path | None = None
         self._skills: dict[str, SkillInfo] = {}
         self._initialize_lock = asyncio.Lock()
@@ -68,30 +68,26 @@ class SkillManager:
                 return
             checkout = await self._checkout_revision()
             skills_root = _contained_directory(checkout, self.config.skills_path)
-            requested = sorted(
-                {skill for profile in self.profiles for skill in profile.skills}
-            )
+            requested = sorted(self.agent.skills)
             skills: dict[str, SkillInfo] = {}
             for name in requested:
                 source = _contained_directory(skills_root, name)
                 skills[name] = validate_skill_package(name, source)
-            for profile in self.profiles:
-                allowed = set(profile.skills)
-                for name in profile.skills:
-                    missing_dependencies = set(skills[name].required_skills) - allowed
-                    if missing_dependencies:
-                        missing = ", ".join(sorted(missing_dependencies))
-                        raise SkillError(
-                            f"skill {name} requires skills outside profile "
-                            f"{profile.name} allowlist: {missing}"
-                        )
+            allowed = set(self.agent.skills)
+            for name in self.agent.skills:
+                missing_dependencies = set(skills[name].required_skills) - allowed
+                if missing_dependencies:
+                    missing = ", ".join(sorted(missing_dependencies))
+                    raise SkillError(
+                        f"skill {name} requires skills outside the agent allowlist: {missing}"
+                    )
             self._validate_runtime_requirements(skills.values())
             self._skills = skills
             self._checkout = checkout
 
-    def profile_snapshot(self, profile: AgentProfileConfig) -> dict[str, Any]:
+    def snapshot(self) -> dict[str, Any]:
         self._require_initialized()
-        snapshot = profile.snapshot()
+        snapshot = self.agent.snapshot()
         snapshot["skill_repository"] = {
             "revision": self.config.revision,
             "source_hash": hashlib.sha256(
@@ -100,34 +96,27 @@ class SkillManager:
         }
         snapshot["skills"] = {
             name: self._skills[name].snapshot(self.config.revision)
-            for name in profile.skills
+            for name in self.agent.skills
         }
         return snapshot
 
-    def claim_profile(self, profile: AgentProfileConfig) -> dict[str, Any]:
-        return {
-            "name": profile.name,
-            "version": profile.version,
-            "config": self.profile_snapshot(profile),
-        }
-
-    def secret_environment_names(self, profile: AgentProfileConfig) -> tuple[str, ...]:
+    def secret_environment_names(self) -> tuple[str, ...]:
         self._require_initialized()
         return tuple(
             sorted(
                 {
                     name
-                    for skill_name in profile.skills
+                    for skill_name in self.agent.skills
                     for name in self._skills[skill_name].required_credentials
                 }
             )
         )
 
-    def install(self, profile: AgentProfileConfig, workspace: Path) -> dict[str, Any]:
+    def install(self, workspace: Path) -> dict[str, Any]:
         self._require_initialized()
         root = workspace.resolve()
         agents_root = root / ".agents"
-        backup_root = root / ".symphony" / "profile-assets-backup"
+        backup_root = root / ".symphony" / "agent-assets-backup"
         if agents_root.exists() and agents_root.is_symlink():
             raise SkillError(f"workspace .agents directory must not be a symlink: {agents_root}")
         if backup_root.exists():
@@ -147,7 +136,7 @@ class SkillManager:
         backup = agents_root / f"skills.backup-{uuid.uuid4().hex}"
         try:
             staging.mkdir()
-            for name in profile.skills:
+            for name in self.agent.skills:
                 shutil.copytree(self._skills[name].source, staging / name)
             if target.exists():
                 if target.is_symlink() or not target.resolve().is_relative_to(root):
@@ -163,7 +152,7 @@ class SkillManager:
                 shutil.rmtree(staging)
             raise
 
-        lock = self.profile_snapshot(profile)
+        lock = self.snapshot()
         lock_path = agents_root / "skills.lock.json"
         lock_path.write_text(
             json.dumps(lock, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -174,7 +163,7 @@ class SkillManager:
     def restore(self, workspace: Path) -> None:
         root = workspace.resolve()
         agents_root = root / ".agents"
-        backup_root = root / ".symphony" / "profile-assets-backup"
+        backup_root = root / ".symphony" / "agent-assets-backup"
         if backup_root.exists():
             self._restore_backup(root, agents_root, backup_root)
 
@@ -436,7 +425,6 @@ def _validate_artifact_path(skill_name: str, value: str) -> None:
         "tech-analysis/",
         "reviews/",
         "test/",
-        "orchestration/handoffs/",
     )
     if not any(value == prefix.rstrip("/") or value.startswith(prefix) for prefix in allowed):
         raise SkillError(f"skill {skill_name} uses unsupported artifact path: {value}")

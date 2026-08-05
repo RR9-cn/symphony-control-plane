@@ -25,7 +25,13 @@ class JsonFormatter(logging.Formatter):
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="Windows-native Symphony runner")
-    result.add_argument("workflow", type=Path, help="Path to repository-owned WORKFLOW.md")
+    result.add_argument(
+        "workflow",
+        type=Path,
+        nargs="?",
+        default=Path("WORKFLOW.md"),
+        help="Path to repository-owned WORKFLOW.md (default: ./WORKFLOW.md)",
+    )
     result.add_argument(
         "--once",
         action="store_true",
@@ -46,8 +52,8 @@ async def run(args: argparse.Namespace) -> int:
             outcomes = await orchestrator.run_once()
             for outcome in outcomes:
                 logging.getLogger(__name__).info(
-                    "WorkItem %s finished with %s",
-                    outcome.item_id,
+                    "Issue %s finished with %s",
+                    outcome.issue_id,
                     outcome.status,
                 )
             return 1 if any(outcome.error for outcome in outcomes) else 0

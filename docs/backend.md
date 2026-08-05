@@ -1,150 +1,58 @@
-# 最小控制面后端
+# Control Plane 后端
 
-第二步后端使用 FastAPI、SQLAlchemy Async 和 SQLite，实现工作项持久化、依赖调度、原子领取、Lease、事件、Artifact 与人工决策。
+后端采用 FastAPI、SQLAlchemy、Alembic 和 SQLite。v2 是不兼容重建：旧 Feature、WorkItem、依赖、角色 Profile 和 Handoff 表均已移除。
 
-## 本地启动
+## 数据模型
 
-```powershell
-python -m pip install -r requirements-dev.txt
-$env:PYTHONPATH = "src"
-$env:ACP_API_TOKEN = "replace-with-a-random-host-only-token"
-alembic upgrade head
-python -m uvicorn control_plane.app:app --host 127.0.0.1 --port 8080
-```
+- `issues`：需求、不可变仓库起点、状态、Claim、重试和交付信息；
+- `issue_events`：生命周期审计；
+- `issue_artifacts`：可选的仓库相对产物登记；
+- `agent_attempts`：每次 Claim 的配置快照、Thread、最新 Turn 和 Turn Count；
+- `agent_attempt_events`：命令、工具、消息和文件变更等结构化执行事件；
+- `human_decisions`：Agent 请求的人工输入；
+- `workers`：Runner 心跳和当前活跃 Issue。
 
-默认数据库位于 `data/control-plane.db`。可复制 `.env.example` 修改路径和维护周期。管理看板位于 `/`，Swagger UI 位于 `/docs`；使用浏览器打开前请遵守当前工作区的浏览器授权规则。
-
-看板和 API 同源部署，不需要额外前端服务或 Node 构建。启用 `ACP_API_TOKEN` 后，在看板右上角“API 凭据”中输入相同 Token；页面只把凭据保存到当前标签页的 `sessionStorage`，关闭标签页后自动清除。
-
-## SQLite 并发策略
-
-- 每个连接启用 `foreign_keys=ON`、WAL、`synchronous=NORMAL` 和 5 秒 `busy_timeout`。
-- Claim 使用单条条件 `UPDATE`，同时校验 `id`、`status=ready`、`version` 和依赖全部完成。
-- 只有更新行数为 1 的请求获得随机 claim token；数据库只保存 token 的 SHA-256 摘要。
-- Heartbeat、运行期状态转换、事件、Artifact 和人工输入请求必须携带未过期 token。
-- 后台维护任务回收过期 Lease，将任务送入 `retry_queued`，退避到期且依赖满足后恢复为 `ready`。
-- SQLite 适合单机控制面和同一数据库文件上的多个 Worker。不要把数据库文件放在不可靠的网络文件系统上；需要多节点数据库服务时应单独规划迁移。
-
-## API
-
-核心接口：
+## 主要 API
 
 ```text
-POST   /api/features
-GET    /api/features
-GET    /api/features/{id}
+POST /api/issues
+GET  /api/issues
+GET  /api/issues/candidates
+GET  /api/issues/{id}
+PATCH /api/issues/{id}
 
-POST   /api/intake/manual/issues/preview
-POST   /api/intake/manual/issues
+POST /api/issues/{id}/claim
+POST /api/issues/{id}/heartbeat
+POST /api/issues/{id}/release
+POST /api/issues/{id}/status
+POST /api/issues/{id}/attempt-context
+GET  /api/issues/{id}/attempts
+POST /api/issues/{id}/attempts/{attempt_id}/events
+GET  /api/issues/{id}/attempts/{attempt_id}/events
+POST /api/issues/{id}/events
+GET  /api/issues/{id}/events
+POST /api/issues/{id}/artifacts
+POST /api/issues/{id}/decisions
+GET  /api/issues/{id}/decisions
 
-POST   /api/work-items
-GET    /api/work-items
-GET    /api/work-items/candidates
-GET    /api/work-items/{id}
-PATCH  /api/work-items/{id}
-
-POST   /api/work-items/{id}/claim
-POST   /api/work-items/{id}/heartbeat
-POST   /api/work-items/{id}/release
-POST   /api/work-items/{id}/status
-
-POST   /api/work-items/{id}/events
-GET    /api/work-items/{id}/events
-POST   /api/work-items/{id}/artifacts
-POST   /api/work-items/{id}/decisions
-GET    /api/work-items/{id}/decisions
-GET    /api/work-items/{id}/attempts
-POST   /api/work-items/{id}/attempts/{attempt_id}/events
-GET    /api/work-items/{id}/attempts/{attempt_id}/events
-
-GET    /api/agent-profiles
-GET    /api/workers
-POST   /api/workers/register
-POST   /api/workers/{worker_id}/heartbeat
-POST   /api/workers/{worker_id}/request-stop
-POST   /api/workers/{worker_id}/stopped
-GET    /api/agent-runtimes
-GET    /api/runner-control
-POST   /api/runner-control/start
-POST   /api/runner-control/stop
-
-POST   /api/maintenance/tick
-GET    /health
+POST /api/issues/{id}/delivery
+GET  /api/agent-runtimes
+POST /api/maintenance/tick
 ```
 
-手工 Issue Intake 接收 Feature ID、需求说明、验收标准、仓库地址、Base Branch 和
-完整 40 位 Git commit。本地仓库可先调用 `POST /api/repositories/resolve-head`，
-传入绝对路径读取当前 `HEAD`，避免用户手工复制 commit。该接口不访问远程仓库，
-也不接受相对路径。`preview` 只生成固定五阶段拆分草案，不写数据库；确认接口在一个
-事务中创建 Feature、五个串行依赖的 WorkItem 和审计事件，只把第一个
-Solution Architect 工作项置为 `ready`。本期不连接或同步外部 Issue 平台。
+Claim 使用版本号做原子 compare-and-set。Claim Token 只在成功领取时返回一次；普通查询只暴露 Worker 和到期时间。Lease 过期后进入 `retry_queued`，维护任务到期后重新置为 `ready`。
 
-Windows Runner 启动时向 `/api/workers/register` 注册，并在空闲和执行期间持续心跳。
-`/api/agent-runtimes` 把 WorkItem 与最新 Attempt 合并为 Agent 视角状态；Thread 和
-Turn 通过 `attempt-context` 在运行中实时登记。`runner-control` 只管理与当前控制面
-同机的托管 Runner，不远程启动其他宿主机进程。
-
-Runner 使用 Attempt Event 接口上报 Codex 的 Turn、Agent 消息、命令、工具调用和
-文件变更。写入要求当前 Claim Token，事件按 Attempt 内 `sequence` 排序；查询支持
-`after_sequence` 和 `limit`。Runner 只发送展示所需字段，控制面再次执行长度限制与
-敏感信息脱敏。Reasoning 事件只保存生命周期，不保存推理文本。
-
-`claim` 请求兼容协议示例中的 camelCase：
-
-```json
-{
-  "workerId": "symphony-01",
-  "expectedVersion": 12,
-  "leaseSeconds": 300,
-  "profile": {
-    "name": "backend_builder",
-    "version": 3,
-    "config": {
-      "profile_name": "backend_builder",
-      "profile_version": 3,
-      "prompt_hash": "..."
-    }
-  }
-}
-```
-
-Profile 字段由 Windows Runner 生成；旧客户端可以省略。控制面会登记不可变的 Profile 版本并把配置快照写入本次 Agent Attempt。同名同版本的不同配置会返回冲突。
-
-Claim token 只在领取成功响应中返回一次。普通 WorkItem 响应仅展示 `worker_id` 和 `expires_at`，不会泄露 token。
-
-设置 `ACP_API_TOKEN` 后，所有 `/api/*` 请求必须携带：
-
-```http
-Authorization: Bearer <token>
-```
-
-`/health` 保持公开并通过 `auth_enabled` 指示认证是否开启。生产部署必须设置高熵 Token；Symphony 端使用相同值配置 `CONTROL_PLANE_TOKEN`。该宿主 Token 不应传递给 Codex 子进程。
-
-Agent 报告完成前必须先登记：
+## 生命周期
 
 ```text
-orchestration/handoffs/<work-item-id>.yaml
+ready → running
+running → reviewing | needs_human | blocked | retry_queued
+needs_human → ready
+blocked → ready
+retry_queued → ready
+reviewing → ready | awaiting_publish
+awaiting_publish → pr_open
+pr_open → done
 ```
 
-否则 `running → stage_review` 会被拒绝。
-
-## 人工模拟
-
-服务启动后运行：
-
-```powershell
-python scripts/simulate_api.py --token $env:ACP_API_TOKEN
-```
-
-脚本会执行：创建 Feature 和 WorkItem、Claim、Heartbeat、写事件、请求人工决策、恢复 Ready、重新 Claim、登记 Handoff、进入 StageReview 并完成。
-
-## 测试
-
-```powershell
-$env:PYTHONPATH = "src"
-pytest -q
-python scripts/validate_protocol.py
-alembic check
-```
-
-当前版本已实现 Symphony 宿主 Bearer 认证、Claim Token 隔离、Agent Profile 版本登记和 Attempt 配置快照。服务默认仅监听 `127.0.0.1`；通过非 loopback 网络部署时应使用 HTTPS，并继续通过网络策略限制访问来源。
+`reviewing` 是整个 Issue 的一次最终人工验收，不是阶段审批。通过后在 Issue Workspace 生成本地 Commit；Push/PR 和合并确认都要求显式授权。Agent 不能调用这些交付 API。

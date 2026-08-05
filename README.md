@@ -1,66 +1,53 @@
-# Fshows Agent Control Plane
+# Fshows Symphony Control Plane
 
-围绕 OpenAI Symphony、Codex App Server 与 `fshows-skills` 建设的自托管 Agent 任务控制面。
-
-## 目标
-
-将系统职责拆分为四层：
-
-- Control Plane：管理工作项、状态、依赖、人工决策和执行历史。
-- Symphony：轮询、领取、路由、并发控制、重试和工作区管理。
-- Codex App Server：执行具体 Agent Thread 与 Turn。
-- Skill：定义不同 Agent 的专业流程、规范和工具使用方式。
-
-第一版优先跑通：
+Windows 原生、SQLite 持久化的 OpenAI Symphony 风格 Agent 调度器。系统不再维护 Feature、WorkItem、固定角色或五阶段流水线；调度单位只有 `Issue`。
 
 ```text
-技术分析
-→ 后端开发
-→ Code Review
-→ 测试方案
-→ 测试执行
-→ 人工确认
+手工创建 Issue
+→ 通用 Coding Agent 领取
+→ 同一 Workspace / Attempt / Thread 内多 Turn 完成分析、实现与测试
+→ 一次最终人工验收
+→ 本地 Commit
+→ 人工授权 Push 与创建 PR
+→ 确认 PR 已合并
 → Done
 ```
 
-## 文档
+## 组件
 
-- [实施方案与任务清单](docs/implementation-plan.md)
-- [调度协议 v1](protocol/README.md)
-- [最小控制面后端](docs/backend.md)
-- [Windows 原生 Symphony Runner](docs/windows-runner.md)
-- [可选 Symphony Elixir Adapter](integrations/symphony_elixir/README.md)
+- Control Plane：FastAPI + SQLite，保存 Issue、Claim/Lease、Attempt/Turn、Event、Artifact、人工决策和交付门禁。
+- Windows Symphony Runner：轮询 `ready` Issue，维护持久 Workspace，启动 `codex app-server` 并执行多 Turn。
+- Codex App Server：一个通用 Coding Agent 负责完整 Issue，可使用子 Agent 和配置的 Skill。
+- UI：以 Issue 和实际 Agent Runtime 为中心，查看 Thread、Turn、事件、产物和人工门禁。
 
-## 管理看板
-
-启动控制面后访问根地址即可打开内置看板：
-
-```powershell
-python -m uvicorn control_plane.app:app --app-dir src --host 127.0.0.1 --port 8080
-```
-
-```text
-http://127.0.0.1:8080/
-```
-
-看板提供手工 Issue 录入与五阶段拆分预览、Feature 筛选、WorkItem 状态列、可展开的 Attempt 执行详情、Event 时间线、Artifact、人工决策、阶段审批、返工、解阻、取消和重试维护操作。执行详情展示 Turn、Agent 消息、命令、工具和文件变更，不保存模型推理文本。后端启用 `ACP_API_TOKEN` 时，可在页面右上角录入 Token；Token 只保存在当前浏览器标签页的 `sessionStorage`。本期不连接外部 Issue 平台。
-
-## 协议校验
-
-安装开发依赖后，可在仓库根目录执行：
+## 启动
 
 ```powershell
 python -m pip install -r requirements-dev.txt
+python -m alembic upgrade head
+python -m uvicorn control_plane.app:app --app-dir src --host 127.0.0.1 --port 8080
+```
+
+打开 `http://127.0.0.1:8080/`。若设置 `ACP_API_TOKEN`，API 需要 Bearer Token，UI 只在当前标签页的 `sessionStorage` 保存它。
+
+Runner 读取根目录的 `WORKFLOW.md`：
+
+```powershell
+$env:CONTROL_PLANE_TOKEN = $env:ACP_API_TOKEN
+fshows-symphony-windows .\WORKFLOW.md
+```
+
+也可在 UI 中启动同机托管 Runner。
+
+## 验证
+
+```powershell
 python scripts/validate_protocol.py
 python scripts/validate_skills.py
-python scripts/validate_workflow.py .\WORKFLOW.md
+python scripts/validate_workflow.py .\WORKFLOW.md --skip-skills
 python -m pytest -q
 ```
 
-正式 Workflow 验收需要设置 `CONTROL_PLANE_TOKEN`、`FSHOWS_SKILLS_REPOSITORY`
-和完整 40 位 `FSHOWS_SKILLS_REVISION`。验收只读取配置、Profile Prompt 和固定
-Skill revision，不领取任务，也不启动 Codex。
+正式 Skill 校验还需要配置 `FSHOWS_SKILLS_REPOSITORY` 和完整 40 位 `FSHOWS_SKILLS_REVISION`。
 
-## 当前状态
-
-实施方案前六步、第七步最小看板和第八步正式 Workflow 已实现。后端采用 SQLite，提供带 Bearer 认证的 WorkItem API、依赖候选查询、原子 Claim、Lease/Heartbeat、状态事件、Artifact、Agent Attempt、Worker 心跳和人工决策。Windows 原生 Python Runner 可直接启动 Windows 版 `codex app-server`，实现安全工作区、PowerShell Hook、Profile 路由与限流、Heartbeat、单 Attempt 多 Turn、异常指数退避、子 Agent Thread 连续性和六个受限 Agent Tool，不依赖 WSL、Elixir 或 Mix。根目录 `WORKFLOW.md` 固化五个 Profile、Workspace Clone/Commit Checkout、固定 Skill revision 和无人值守规则，并由只读验收器阻止 Role、Prompt 与 Skill 漂移。Skill 使用固定 Git commit、Profile allowlist 物理注入、兼容性校验、Codex 用户 Skill 隔离、`skills/list` 启动验证和 revision/content hash 执行快照。内置响应式看板以 Agent 状态为中心，支持同机 Runner 启停、Thread/Turn 观测和人工门禁；手工 Issue 录入可从本地仓库自动读取不可变 HEAD。Elixir 叠加层保留为可选兼容参考。
+详细设计见 [实施方案](docs/implementation-plan.md)、[后端协议](docs/backend.md) 和 [Windows Runner](docs/windows-runner.md)。

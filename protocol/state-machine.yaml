@@ -1,168 +1,35 @@
-schema_version: 1
-
-initial_status: draft
+version: 2
+entity: issue
+statuses:
+  - ready
+  - running
+  - retry_queued
+  - needs_human
+  - blocked
+  - reviewing
+  - awaiting_publish
+  - pr_open
+  - done
+  - cancelled
 terminal_statuses:
   - done
   - cancelled
-
-statuses:
-  draft:
-    description: 尚未满足调度所需信息。
-  ready:
-    description: 信息完整、依赖满足且可被领取。
-  running:
-    description: 已被 Worker 原子领取并持有有效 lease。
-  needs_human:
-    description: 等待结构化人工决策；不得持有 claim。
-  blocked:
-    description: 外部前置条件不满足；不得持有 claim。
-  stage_review:
-    description: Agent 已交付，等待本阶段质量门禁判定。
-  rework:
-    description: 阶段门禁拒绝交付，等待生成返工尝试。
-  retry_queued:
-    description: 技术失败或 lease 过期，等待退避到期。
-  done:
-    description: 本工作项已满足完成条件。
-  cancelled:
-    description: 管理员终止工作项，不再调度。
-
 transitions:
-  - from: draft
-    to: ready
-    event: work_item_readied
-    actor: control_plane
-    guards:
-      - required_fields_present
-      - dependencies_done
-      - no_open_blocker
-  - from: ready
-    to: running
-    event: claimed
-    actor: worker
-    guards:
-      - expected_version_matches
-      - dependencies_done
-      - no_active_claim
-    effects:
-      - issue_claim_token
-      - set_lease_expiry
-      - increment_version
-  - from: running
-    to: stage_review
-    event: agent_completed
-    actor: worker
-    guards:
-      - valid_claim_token
-      - valid_handoff_recorded
-    effects:
-      - clear_claim
-  - from: running
-    to: needs_human
-    event: human_input_requested
-    actor: worker
-    guards:
-      - valid_claim_token
-      - open_decision_recorded
-    effects:
-      - clear_claim
-  - from: running
-    to: blocked
-    event: work_item_blocked
-    actor: worker
-    guards:
-      - valid_claim_token
-      - blocker_recorded
-    effects:
-      - clear_claim
-  - from: running
-    to: retry_queued
-    event: retry_scheduled
-    actor: control_plane
-    guards:
-      - attempt_failed_or_lease_expired
-    effects:
-      - clear_claim
-      - revoke_claim_token
-      - set_retry_at
-  - from: stage_review
-    to: done
-    event: stage_approved
-    actor: policy_or_human
-    guards:
-      - stage_completion_conditions_met
-  - from: stage_review
-    to: rework
-    event: stage_rejected
-    actor: policy_or_human
-    guards:
-      - rework_reason_recorded
-  - from: stage_review
-    to: needs_human
-    event: human_review_requested
-    actor: policy
-    guards:
-      - open_decision_recorded
-  - from: needs_human
-    to: ready
-    event: human_decision_resolved
-    actor: human
-    guards:
-      - decision_recorded
-      - dependencies_done
-  - from: blocked
-    to: ready
-    event: blocker_resolved
-    actor: control_plane
-    guards:
-      - blocker_cleared
-      - dependencies_done
-  - from: retry_queued
-    to: ready
-    event: retry_due
-    actor: control_plane
-    guards:
-      - retry_time_reached
-      - dependencies_done
-  - from: rework
-    to: ready
-    event: rework_queued
-    actor: control_plane
-    guards:
-      - rework_scope_recorded
-      - dependencies_done
-  - from: draft
-    to: cancelled
-    event: work_item_cancelled
-    actor: admin
-  - from: ready
-    to: cancelled
-    event: work_item_cancelled
-    actor: admin
-  - from: running
-    to: cancelled
-    event: work_item_cancelled
-    actor: admin
-    effects:
-      - clear_claim
-      - revoke_claim_token
-  - from: needs_human
-    to: cancelled
-    event: work_item_cancelled
-    actor: admin
-  - from: blocked
-    to: cancelled
-    event: work_item_cancelled
-    actor: admin
-  - from: stage_review
-    to: cancelled
-    event: work_item_cancelled
-    actor: admin
-  - from: rework
-    to: cancelled
-    event: work_item_cancelled
-    actor: admin
-  - from: retry_queued
-    to: cancelled
-    event: work_item_cancelled
-    actor: admin
+  - {from: ready, to: running, event: claimed, actor: worker}
+  - {from: running, to: retry_queued, event: retry_scheduled, actor: worker}
+  - {from: running, to: retry_queued, event: lease_expired, actor: system}
+  - {from: retry_queued, to: ready, event: retry_due, actor: system}
+  - {from: running, to: needs_human, event: human_input_requested, actor: agent}
+  - {from: needs_human, to: ready, event: human_input_resolved, actor: human}
+  - {from: running, to: blocked, event: agent_blocked, actor: agent}
+  - {from: blocked, to: ready, event: retry_requested, actor: human}
+  - {from: running, to: reviewing, event: agent_completed, actor: agent}
+  - {from: reviewing, to: ready, event: result_rejected, actor: human}
+  - {from: reviewing, to: awaiting_publish, event: result_approved, actor: human}
+  - {from: awaiting_publish, to: pr_open, event: pull_request_created, actor: human}
+  - {from: pr_open, to: done, event: pull_request_merged, actor: human}
+  - {from: ready, to: cancelled, event: cancelled, actor: human}
+  - {from: retry_queued, to: cancelled, event: cancelled, actor: human}
+  - {from: needs_human, to: cancelled, event: cancelled, actor: human}
+  - {from: blocked, to: cancelled, event: cancelled, actor: human}
+  - {from: reviewing, to: cancelled, event: cancelled, actor: human}

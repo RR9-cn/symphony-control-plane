@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fshows.local/schemas/issue.schema.json",
+  "title": "Fshows Symphony Issue",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "title", "description", "priority", "repository", "acceptance_criteria"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^ISSUE-[0-9]{3,}$"},
+    "title": {"type": "string", "minLength": 1, "maxLength": 200},
+    "description": {"type": "string", "minLength": 1},
+    "priority": {"type": "integer", "minimum": 0, "maximum": 4},
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "base_branch", "commit"],
+      "properties": {
+        "url": {"type": "string", "minLength": 1},
+        "base_branch": {"type": "string", "minLength": 1},
+        "commit": {"type": "string", "pattern": "^[a-fA-F0-9]{40}$"}
+      }
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    }
+  }
+}

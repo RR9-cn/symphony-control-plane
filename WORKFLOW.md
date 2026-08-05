@@ -21,41 +21,24 @@ hooks:
     $issue = $env:SYMPHONY_ISSUE_JSON | ConvertFrom-Json
     $repository = [string]$issue.repository.url
     $commit = [string]$issue.repository.commit
-
     if ([string]::IsNullOrWhiteSpace($repository)) {
-      throw "WorkItem repository.url is required"
+      throw "Issue repository.url is required"
     }
     if ($commit -notmatch '^[0-9a-fA-F]{40}$') {
-      throw "WorkItem repository.commit must be a full 40-character Git commit"
+      throw "Issue repository.commit must be a full 40-character Git commit"
     }
-
     & git clone --no-checkout -- $repository .
-    if ($LASTEXITCODE -ne 0) {
-      throw "git clone failed with exit code $LASTEXITCODE"
-    }
+    if ($LASTEXITCODE -ne 0) { throw "git clone failed with exit code $LASTEXITCODE" }
     & git cat-file -e "$commit^{commit}"
-    if ($LASTEXITCODE -ne 0) {
-      throw "WorkItem repository.commit is not available in the cloned repository"
-    }
+    if ($LASTEXITCODE -ne 0) { throw "Issue repository.commit is unavailable" }
     & git checkout --detach $commit
-    if ($LASTEXITCODE -ne 0) {
-      throw "git checkout failed with exit code $LASTEXITCODE"
-    }
-
+    if ($LASTEXITCODE -ne 0) { throw "git checkout failed with exit code $LASTEXITCODE" }
     $actual = (& git rev-parse HEAD).Trim().ToLowerInvariant()
-    if ($LASTEXITCODE -ne 0 -or $actual -ne $commit.ToLowerInvariant()) {
-      throw "Workspace HEAD does not match WorkItem repository.commit"
-    }
+    if ($actual -ne $commit.ToLowerInvariant()) { throw "Workspace HEAD does not match Issue repository.commit" }
   before_run: |
     $ErrorActionPreference = "Stop"
     & git rev-parse --is-inside-work-tree *> $null
-    if ($LASTEXITCODE -ne 0) {
-      throw "WorkItem workspace is not a Git repository"
-    }
-
-agent:
-  max_concurrent_agents: 4
-  max_retry_backoff_ms: 300000
+    if ($LASTEXITCODE -ne 0) { throw "Issue workspace is not a Git repository" }
 
 skill_repository:
   url: $FSHOWS_SKILLS_REPOSITORY
@@ -63,76 +46,25 @@ skill_repository:
   skills_path: skills
   cache_root: ./.symphony-cache/skills
 
-agent_profiles:
-  solution_architect:
-    version: 2
-    match:
-      agent_role: solution_architect
-    prompt_file: workflows/solution-architect.md
-    skills:
-      - fskill-analysis-tech
-      - fskill-knowledge-query
-      - fskill-tools-db
-    sandbox: danger-full-access
-    network_access: false
-    max_concurrent_agents: 2
-    max_turns: 10
-
-  backend_builder:
-    version: 2
-    match:
-      agent_role: backend_builder
-    prompt_file: workflows/backend-builder.md
-    skills:
-      - fskill-code-java-guide
-      - fskill-knowledge-query
-      - fskill-tools-db
-    sandbox: danger-full-access
-    network_access: true
-    max_concurrent_agents: 4
-    max_turns: 20
-
-  code_reviewer:
-    version: 2
-    match:
-      agent_role: code_reviewer
-    prompt_file: workflows/code-reviewer.md
-    skills:
-      - fskill-code-review
-    sandbox: danger-full-access
-    network_access: false
-    max_concurrent_agents: 3
-    max_turns: 10
-
-  test_designer:
-    version: 2
-    match:
-      agent_role: test_designer
-    prompt_file: workflows/test-designer.md
-    skills:
-      - fskill-test-explore
-    sandbox: danger-full-access
-    network_access: false
-    max_concurrent_agents: 2
-    max_turns: 10
-
-  test_executor:
-    version: 2
-    match:
-      agent_role: test_executor
-    prompt_file: workflows/test-executor.md
-    skills:
-      - fskill-test-verify
-    sandbox: danger-full-access
-    network_access: true
-    max_concurrent_agents: 2
-    max_turns: 15
+agent:
+  max_concurrent_agents: 4
+  max_retry_backoff_ms: 300000
+  max_turns: 30
+  sandbox: danger-full-access
+  network_access: true
+  skills:
+    - fskill-analysis-tech
+    - fskill-code-java-guide
+    - fskill-code-review
+    - fskill-knowledge-query
+    - fskill-test-explore
+    - fskill-test-verify
+    - fskill-tools-db
 
 codex:
   command: codex app-server
   isolate_user_home: true
   approval_policy: never
-  thread_sandbox: danger-full-access
   turn_sandbox_policy:
     type: dangerFullAccess
   turn_timeout_ms: 3600000
@@ -140,58 +72,37 @@ codex:
   stall_timeout_ms: 300000
 ---
 
-You are working autonomously on WorkItem {{ issue.identifier }}.
+You are the coding agent responsible for Issue {{ issue.identifier }} from analysis through implementation and validation.
 
 Title: {{ issue.title }}
 
 Description:
 {{ issue.description }}
 
-Agent role: {{ issue.agent_role }}
-Stage: {{ issue.stage }}
 Attempt: {{ attempt | default: 0 }}
 
-Repository input:
+Repository:
 - URL: {{ issue.repository.url }}
 - Base branch: {{ issue.repository.base_branch }}
-- Immutable commit: {{ issue.repository.commit }}
+- Immutable starting commit: {{ issue.repository.commit }}
 
 Acceptance criteria:
 {% for criterion in issue.acceptance_criteria %}
 - {{ criterion }}
 {% endfor %}
 
-Execution rules:
+Execution contract:
 
-1. Work only inside the provided Feature workspace and follow the selected
-   Agent Profile and its allowed Skills. Every WorkItem in the same Feature
-   shares this persistent Git workspace and cumulative change set.
-2. Treat the WorkItem, registered input Artifacts, repository commit, and prior
-   Handoffs as the authoritative execution context.
-3. Use only the bound `work_item_*` tools for Control Plane writes. Never expose
-   or request the Control Plane Bearer Token or the WorkItem Claim Token.
-4. Do not push, merge, release, publish externally, use production credentials,
-   or perform destructive cleanup without an explicit human authorization flow.
-5. If a decision or permission is required, call `work_item_request_human` with
-   a concrete question and options, then end the Turn. Do not wait for terminal
-   input inside the Codex session.
-6. If execution cannot continue because of a real external condition, call
-   `work_item_block` with actionable evidence. Do not report incomplete work as
-   complete.
-7. Record material progress and validation through WorkItem events. Register
-   every required output Artifact using its repository-relative canonical path.
-8. Before calling `work_item_complete`, run the relevant validation, create the
-   schema-valid `orchestration/handoffs/{{ issue.identifier }}.yaml`, and register
-   that Handoff as an output Artifact.
-9. A successful Codex Turn is not sufficient by itself. The WorkItem is handed
-   off only through the bound completion tool and then waits for Stage Review.
-10. Do not create independent per-stage clones. Backend, Review and Test stages
-    must inspect the same Feature workspace. After the Test Executor is approved,
-    the Control Plane creates the local delivery commit; Push, PR creation and
-    merge remain explicit human-authorized Feature delivery gates.
+1. Work only in the provided persistent Issue workspace. Analyze the existing code, implement the complete scoped change, add or update tests, and run relevant validation.
+2. Use the available Skills when they materially help, but remain responsible for the complete Issue rather than handing it to another lifecycle role.
+3. Use only the bound `issue_*` tools for Control Plane writes. Never expose or request tracker credentials or the Issue claim token.
+4. Do not push, create a Pull Request, merge, publish, release, use production credentials, or perform destructive cleanup. Those actions remain explicit human delivery gates.
+5. If a material decision is required, call `issue_request_human` with a concrete question and options, then end the Turn.
+6. If a real external blocker prevents progress, call `issue_block` with actionable evidence. Do not submit incomplete work as complete.
+7. Record important progress with `issue_add_event` and register durable supporting artifacts with `issue_add_artifact` when useful.
+8. Before calling `issue_complete`, inspect the final diff, run relevant tests and checks, and verify every acceptance criterion. `issue_complete` submits the whole Issue for one final human review.
+9. A successful Turn alone does not complete the Issue. Continue in the same Thread until the completion, human-input, or blocker tool ends the run.
 
 {% if attempt %}
-This is continuation or retry attempt {{ attempt }}. Reuse the current Workspace
-and existing Thread context. Inspect prior work and events, then continue from
-the remaining scoped work instead of restarting completed investigation.
+This is continuation or retry attempt {{ attempt }}. Reuse the existing Workspace and Thread context. Continue from the remaining work instead of repeating completed investigation.
 {% endif %}

@@ -1,21 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import re
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from urllib.parse import urlparse
 
-from control_plane.errors import ControlPlaneError
-from symphony_windows.workflow import load_workflow
 from symphony_windows.workspace import workspace_key
 
 
-class DeliveryError(ControlPlaneError):
-    status_code = 422
-    code = "feature_delivery_failed"
+class DeliveryError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -25,214 +20,118 @@ class CommandResult:
     stderr: str
 
 
-class FeatureDeliveryManager:
-    def __init__(self, workflow_path: str, *, workspace_root: Path | None = None) -> None:
-        self.workflow_path = Path(workflow_path).resolve()
-        self.workspace_root = (
-            workspace_root.resolve()
-            if workspace_root is not None
-            else load_workflow(self.workflow_path).workspace.root
-        )
+class IssueDeliveryManager:
+    def __init__(self, workspace_root: Path) -> None:
+        self.workspace_root = workspace_root.resolve()
 
-    def workspace(self, feature_id: str) -> Path:
-        return self.workspace_root / workspace_key(feature_id)
+    def workspace(self, issue_id: str) -> Path:
+        return self.workspace_root / workspace_key(issue_id)
 
-    async def prepare_local_commit(
-        self, feature_id: str, title: str
-    ) -> tuple[str, str]:
-        workspace = self.workspace(feature_id)
+    async def prepare_local_commit(self, issue_id: str, title: str) -> tuple[str, str]:
+        workspace = self.workspace(issue_id)
         await self._require_repository(workspace)
-        backup = workspace / ".symphony" / "profile-assets-backup"
+        backup = workspace / ".symphony" / "agent-assets-backup"
         if backup.exists():
-            raise DeliveryError("Agent Profile assets are still installed in the workspace")
-        branch = _delivery_branch(feature_id)
+            raise DeliveryError("Agent assets are still installed in the workspace")
+        branch = f"codex/{issue_id.lower()}"
         await _run("git", "checkout", "-B", branch, cwd=workspace)
-        await _run(
-            "git",
-            "add",
-            "-A",
-            "--",
-            ".",
-            ":(exclude).agents/**",
-            ":(exclude).symphony/**",
-            cwd=workspace,
-        )
-        staged = await _run_result(
-            "git", "diff", "--cached", "--quiet", cwd=workspace
-        )
+        await _run("git", "add", "-A", cwd=workspace)
+        await _run("git", "reset", "--", ".agents", ".symphony", cwd=workspace, allow_failure=True)
+        staged = await _run_result("git", "diff", "--cached", "--quiet", cwd=workspace)
         if staged.returncode == 1:
-            await _run(
-                "git",
-                "-c",
-                "user.name=Fshows Symphony",
-                "-c",
-                "user.email=symphony@fshows.local",
-                "commit",
-                "-m",
-                f"feat: {title}",
-                cwd=workspace,
-            )
+            await _run("git", "commit", "-m", f"feat: {title}", cwd=workspace)
         elif staged.returncode != 0:
             raise DeliveryError(_process_error(staged, "git diff --cached failed"))
         commit = (await _run("git", "rev-parse", "HEAD", cwd=workspace)).strip()
-        if not re.fullmatch(r"[a-f0-9]{40}", commit):
-            raise DeliveryError("local delivery commit is invalid")
         return branch, commit
 
     async def publish(
         self,
-        feature_id: str,
-        title: str,
-        repository: dict[str, Any],
+        issue_id: str,
+        *,
+        repository_url: str,
+        base_branch: str,
         branch: str,
         commit: str,
+        title: str,
+        body: str,
     ) -> str:
-        workspace = self.workspace(feature_id)
+        workspace = self.workspace(issue_id)
         await self._require_repository(workspace)
         actual = (await _run("git", "rev-parse", "HEAD", cwd=workspace)).strip()
         if actual != commit:
-            raise DeliveryError("Feature workspace HEAD does not match local delivery commit")
-        remote_url = await _delivery_remote(repository)
-        remote_name = "symphony-delivery"
+            raise DeliveryError("Issue workspace HEAD does not match local delivery commit")
+        remote_url = await _resolve_remote(repository_url)
+        remote_name = "symphony-origin"
         remotes = (await _run("git", "remote", cwd=workspace)).splitlines()
         if remote_name in remotes:
             await _run("git", "remote", "set-url", remote_name, remote_url, cwd=workspace)
         else:
             await _run("git", "remote", "add", remote_name, remote_url, cwd=workspace)
-        await _run(
-            "git",
-            "push",
-            "--set-upstream",
-            remote_name,
-            f"HEAD:refs/heads/{branch}",
-            cwd=workspace,
+        await _run("git", "push", "--set-upstream", remote_name, f"HEAD:{branch}", cwd=workspace)
+        existing = await _run_result(
+            "gh", "pr", "view", branch, "--repo", _github_repo(remote_url), "--json", "url", "--jq", ".url", cwd=workspace
         )
-        repository_slug = _github_slug(remote_url)
-        base_branch = str(repository.get("base_branch") or "main")
-        body = (
-            f"Automated implementation for {feature_id}.\n\n"
-            f"Local commit: `{commit}`\n\n"
-            "Generated by Fshows Symphony after all configured test stages passed."
-        )
-        created = await _run_result(
-            "gh",
-            "pr",
-            "create",
-            "--repo",
-            repository_slug,
-            "--base",
-            base_branch,
-            "--head",
-            branch,
-            "--title",
-            title,
-            "--body",
-            body,
-            cwd=workspace,
-        )
-        if created.returncode == 0:
-            pull_request = created.stdout.strip().splitlines()[-1]
-        else:
-            pull_request = (
-                await _run(
-                    "gh",
-                    "pr",
-                    "view",
-                    branch,
-                    "--repo",
-                    repository_slug,
-                    "--json",
-                    "url",
-                    "--jq",
-                    ".url",
-                    cwd=workspace,
-                )
-            ).strip()
-        if not pull_request.startswith("https://"):
-            raise DeliveryError("GitHub CLI did not return a pull request URL")
-        return pull_request
-
-    async def verify_merged(self, pull_request: str) -> None:
-        result = (
+        if existing.returncode == 0 and existing.stdout.strip():
+            return existing.stdout.strip()
+        return (
             await _run(
-                "gh",
-                "pr",
-                "view",
-                pull_request,
-                "--json",
-                "state",
-                "--jq",
-                ".state",
-                cwd=self.workflow_path.parent,
+                "gh", "pr", "create", "--repo", _github_repo(remote_url), "--base", base_branch,
+                "--head", branch, "--title", title, "--body", body, cwd=workspace
             )
         ).strip()
-        if result.upper() != "MERGED":
-            raise DeliveryError(f"pull request is not merged (state={result or 'unknown'})")
+
+    async def verify_merged(self, repository_url: str, pull_request: str) -> None:
+        remote_url = await _resolve_remote(repository_url)
+        result = await _run(
+            "gh", "pr", "view", pull_request, "--repo", _github_repo(remote_url), "--json", "state", "--jq", ".state",
+            cwd=self.workspace_root,
+        )
+        if result.strip().upper() != "MERGED":
+            raise DeliveryError("Pull Request has not been merged")
 
     @staticmethod
     async def _require_repository(workspace: Path) -> None:
         if not workspace.is_dir():
-            raise DeliveryError(f"Feature workspace does not exist: {workspace}")
+            raise DeliveryError(f"Issue workspace does not exist: {workspace}")
         inside = (await _run("git", "rev-parse", "--is-inside-work-tree", cwd=workspace)).strip()
         if inside != "true":
-            raise DeliveryError("Feature workspace is not a Git repository")
+            raise DeliveryError("Issue workspace is not a Git repository")
 
 
-async def _delivery_remote(repository: dict[str, Any]) -> str:
-    value = str(repository.get("url") or "").strip()
-    local = Path(value)
-    if local.is_absolute() and local.is_dir():
-        return (await _run("git", "remote", "get-url", "origin", cwd=local)).strip()
-    if not value:
-        raise DeliveryError("repository URL is missing")
+async def _resolve_remote(value: str) -> str:
+    candidate = Path(value)
+    if candidate.is_absolute() and candidate.is_dir():
+        return (await _run("git", "remote", "get-url", "origin", cwd=candidate)).strip()
     return value
 
 
-def _delivery_branch(feature_id: str) -> str:
-    suffix = re.sub(r"[^a-z0-9._-]+", "-", feature_id.lower()).strip("-.")
-    return f"codex/{suffix}"
+def _github_repo(remote: str) -> str:
+    if remote.startswith("git@github.com:"):
+        value = remote.removeprefix("git@github.com:")
+    else:
+        parsed = urlparse(remote)
+        if parsed.hostname != "github.com":
+            raise DeliveryError("Pull Request delivery currently supports GitHub repositories")
+        value = parsed.path.lstrip("/")
+    value = re.sub(r"\.git$", "", value)
+    if value.count("/") != 1:
+        raise DeliveryError("cannot determine GitHub owner/repository")
+    return value
 
 
-def _github_slug(remote_url: str) -> str:
-    patterns = (
-        r"^https://github\.com/([^/]+/[^/]+?)(?:\.git)?$",
-        r"^git@github\.com:([^/]+/[^/]+?)(?:\.git)?$",
-        r"^ssh://git@github\.com/([^/]+/[^/]+?)(?:\.git)?$",
-    )
-    for pattern in patterns:
-        match = re.fullmatch(pattern, remote_url.rstrip("/"))
-        if match:
-            return match.group(1)
-    raise DeliveryError(f"pull request creation requires a GitHub remote: {remote_url}")
-
-
-async def _run(*args: str, cwd: Path) -> str:
+async def _run(*args: str, cwd: Path, allow_failure: bool = False) -> str:
     result = await _run_result(*args, cwd=cwd)
-    if result.returncode != 0:
-        raise DeliveryError(_process_error(result, f"command failed: {' '.join(args[:3])}"))
+    if result.returncode != 0 and not allow_failure:
+        raise DeliveryError(_process_error(result, "command failed"))
     return result.stdout
 
 
 async def _run_result(*args: str, cwd: Path) -> CommandResult:
-    executable = shutil.which(args[0])
-    if executable is None:
-        raise DeliveryError(f"required executable is unavailable: {args[0]}")
-    env = os.environ.copy()
-    env["GIT_TERMINAL_PROMPT"] = "0"
     process = await asyncio.create_subprocess_exec(
-        executable,
-        *args[1:],
-        cwd=cwd,
-        env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        *args, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=180)
-    except TimeoutError as error:
-        process.kill()
-        await process.wait()
-        raise DeliveryError(f"command timed out: {' '.join(args[:3])}") from error
+    stdout, stderr = await process.communicate()
     return CommandResult(
         returncode=process.returncode or 0,
         stdout=stdout.decode("utf-8", errors="replace"),
@@ -240,5 +139,7 @@ async def _run_result(*args: str, cwd: Path) -> CommandResult:
     )
 
 
-def _process_error(process: CommandResult, fallback: str) -> str:
-    return (process.stderr or process.stdout).strip() or fallback
+def _process_error(result: CommandResult, fallback: str) -> str:
+    stderr = result.stderr.strip()
+    stdout = result.stdout.strip()
+    return stderr or stdout or fallback

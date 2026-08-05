@@ -8,7 +8,6 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from pathlib import PurePosixPath
 from typing import Any
 
 from symphony_windows.workflow import HookConfig, WorkspaceConfig
@@ -42,7 +41,6 @@ class WorkspaceManager:
     async def prepare(self, issue: dict[str, Any]) -> PreparedWorkspace:
         identifier = str(
             issue.get("workspace_identifier")
-            or issue.get("feature_id")
             or issue.get("identifier")
             or issue.get("id")
             or ""
@@ -72,54 +70,6 @@ class WorkspaceManager:
 
     async def before_run(self, issue: dict[str, Any], workspace: Path) -> None:
         await self.run_hook("before_run", issue, workspace)
-
-    def materialize_input_artifacts(
-        self, issue: dict[str, Any], workspace: Path
-    ) -> tuple[str, ...]:
-        artifacts = issue.get("input_artifacts") or []
-        dependencies = issue.get("dependencies") or []
-        if not isinstance(artifacts, list) or not isinstance(dependencies, list):
-            raise WorkspaceError("WorkItem input artifacts or dependencies are invalid")
-        materialized: list[str] = []
-        for artifact in artifacts:
-            if not isinstance(artifact, dict):
-                raise WorkspaceError("WorkItem input artifact must be an object")
-            relative = _artifact_relative_path(artifact.get("path"))
-            expected_sha = artifact.get("sha256")
-            target = (workspace / relative).resolve()
-            if target.is_file() and (
-                not expected_sha or _file_sha256(target) == expected_sha
-            ):
-                materialized.append(relative.as_posix())
-                continue
-
-            source = None
-            for dependency_id in dependencies:
-                dependency_workspace = (
-                    self.config.root.resolve() / workspace_key(str(dependency_id))
-                )
-                candidate = (dependency_workspace / relative).resolve()
-                if (
-                    candidate.is_file()
-                    and candidate.is_relative_to(dependency_workspace.resolve())
-                    and (
-                        not expected_sha or _file_sha256(candidate) == expected_sha
-                    )
-                ):
-                    source = candidate
-                    break
-            if source is None:
-                raise WorkspaceError(
-                    f"input artifact is unavailable: {relative.as_posix()}"
-                )
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
-            if expected_sha and _file_sha256(target) != expected_sha:
-                raise WorkspaceError(
-                    f"input artifact checksum mismatch: {relative.as_posix()}"
-                )
-            materialized.append(relative.as_posix())
-        return tuple(materialized)
 
     async def after_run(self, issue: dict[str, Any], workspace: Path) -> None:
         await self.run_hook("after_run", issue, workspace, ignore_failure=True)
@@ -195,20 +145,3 @@ def workspace_key(identifier: str) -> str:
         sanitized = sanitized[:96].rstrip(". ")
         changed = True
     return f"{sanitized}-{digest}" if changed else sanitized
-
-
-def _artifact_relative_path(value: object) -> Path:
-    if not isinstance(value, str) or not value or "\\" in value:
-        raise WorkspaceError("input artifact path must be a relative POSIX path")
-    posix = PurePosixPath(value)
-    if posix.is_absolute() or any(part in {"", ".", ".."} for part in posix.parts):
-        raise WorkspaceError(f"unsafe input artifact path: {value}")
-    return Path(*posix.parts)
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()

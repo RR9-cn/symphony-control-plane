@@ -88,7 +88,7 @@ class CodexAppServer:
                 )
                 turn_count += 1
                 await tracker.update_attempt_context(
-                    lease, thread_id=thread_id, turn_id=turn_id
+                    lease, thread_id=thread_id, turn_id=turn_id, turn_count=turn_count
                 )
                 try:
                     status = await asyncio.wait_for(
@@ -347,7 +347,7 @@ class CodexAppServer:
                 )
                 await self._send({"id": message["id"], "result": execution.response})
                 if execution.stop_agent:
-                    return "work_item_released"
+                    return "issue_released"
                 continue
             if method in _APPROVAL_METHODS and "id" in message:
                 question = _input_question(method, message.get("params"))
@@ -476,14 +476,14 @@ class CodexAppServer:
 def _continuation_prompt(
     issue: dict[str, Any], turn_number: int, max_turns: int
 ) -> str:
-    identifier = issue.get("identifier") or issue.get("id") or "current WorkItem"
+    identifier = issue.get("identifier") or issue.get("id") or "current Issue"
     return (
-        f"Continue working on WorkItem {identifier} in this same live session "
+        f"Continue working on Issue {identifier} in this same live session "
         f"(turn {turn_number} of {max_turns}). The previous turn ended without "
-        "a workflow handoff. Reuse the analysis, file changes, and sub-agent "
+        "submitting a final Issue result. Reuse the analysis, file changes, and sub-agent "
         "results already present in this thread and workspace; do not restart "
         "discovery. Complete the remaining scoped work, validate it, and call "
-        "the appropriate Control Plane tool to hand off, request human input, "
+        "the appropriate Control Plane tool to complete the Issue, request human input, "
         "or record a blocker."
     )
 
