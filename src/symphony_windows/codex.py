@@ -90,16 +90,11 @@ class CodexAppServer:
                 await tracker.update_attempt_context(
                     lease, thread_id=thread_id, turn_id=turn_id, turn_count=turn_count
                 )
-                try:
-                    status = await asyncio.wait_for(
-                        self._receive_turn(tracker, lease, thread_id),
-                        timeout=self.config.turn_timeout_ms / 1000,
-                    )
-                except TimeoutError as error:
-                    raise CodexError(
-                        f"Codex turn exceeded {self.config.turn_timeout_ms}ms"
-                    ) from error
+                status = await self._receive_turn(tracker, lease, thread_id)
                 if status != "turn_completed":
+                    break
+                if lease.active and not await tracker.refresh_claim(lease):
+                    status = "issue_released"
                     break
             return CodexRunResult(
                 status=status,
@@ -314,13 +309,10 @@ class CodexAppServer:
         lease: ClaimLease,
         thread_id: str,
     ) -> str:
-        silence_timeout_ms = (
-            self.config.stall_timeout_ms
-            if self.config.stall_timeout_ms > 0
-            else self.config.turn_timeout_ms
-        )
         while True:
-            message = await self._read_message(silence_timeout_ms)
+            # turn_timeout_ms is a silence timeout. Every successfully read
+            # App Server message resets it; it is not a total Turn duration.
+            message = await self._read_message(self.config.turn_timeout_ms)
             await self._emit(message)
             method = message.get("method")
             if method == "turn/completed":

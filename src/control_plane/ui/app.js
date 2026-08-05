@@ -141,7 +141,7 @@ function renderActions(issue) {
   if (issue.status === "awaiting_publish") buttons.push(["authorize_publish", "授权 Push / 创建 PR"]);
   if (issue.status === "pr_open") buttons.push(["confirm_merge", "核验 PR 已合并"]);
   if (issue.status === "blocked") buttons.push(["retry_requested", "解除阻塞并重试"]);
-  if (["ready", "retry_queued", "needs_human", "blocked", "reviewing"].includes(issue.status)) buttons.push(["cancelled", "取消 Issue"]);
+  if (["ready", "running", "retry_queued", "needs_human", "blocked", "reviewing"].includes(issue.status)) buttons.push(["cancelled", issue.status === "running" ? "停止并取消 Issue" : "取消 Issue"]);
   dom.detailActions.innerHTML = buttons.map(([action, label]) => `<button class="button ${action === "cancelled" ? "ghost" : ""}" data-action="${action}" data-version="${issue.version}">${label}</button>`).join("");
 }
 
@@ -165,6 +165,9 @@ dom.search.addEventListener("input", renderIssues);
 dom.runnerButton.addEventListener("click", async () => { try { const action = dom.runnerButton.dataset.action; await api(`/api/runner-control/${action}`, { method: "POST", body: "{}" }); toast(action === "start" ? "Runner 已启动" : "Runner 已停止"); await refresh(); } catch (error) { toast(error.message, true); } });
 dom.issueForm.addEventListener("submit", async (event) => { event.preventDefault(); if (event.submitter?.value === "cancel") { dom.issueModal.close(); return; } try { const issue = await api("/api/issues", { method: "POST", body: JSON.stringify(issuePayload()) }); dom.issueModal.close(); toast(`已创建 ${issue.id}`); await refresh(); } catch (error) { dom.issueError.textContent = error.message; dom.issueError.hidden = false; } });
 dom.tokenForm.addEventListener("submit", (event) => { event.preventDefault(); if (event.submitter?.value === "cancel") { dom.tokenModal.close(); return; } state.token = dom.tokenInput.value.trim(); if (state.token) sessionStorage.setItem("acp_api_token", state.token); else sessionStorage.removeItem("acp_api_token"); dom.tokenModal.close(); refresh(); });
+$("#issue-close-button").addEventListener("click", () => dom.issueModal.close());
+$("#issue-cancel-button").addEventListener("click", () => dom.issueModal.close());
+$("#token-cancel-button").addEventListener("click", () => dom.tokenModal.close());
 dom.issueList.addEventListener("click", (event) => { const card = event.target.closest("[data-issue-id]"); if (card) openDetail(card.dataset.issueId); });
 dom.runtimeList.addEventListener("click", (event) => { const card = event.target.closest("[data-issue-id]"); if (card) openDetail(card.dataset.issueId); });
 dom.detailActions.addEventListener("click", (event) => { const button = event.target.closest("[data-action]"); if (button) runAction(button.dataset.action, button.dataset.version); });

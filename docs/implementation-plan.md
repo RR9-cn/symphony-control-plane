@@ -67,15 +67,17 @@ Turn 是 Attempt 内部事件，不驱动宏观状态来回切换。
 - [x] 一次最终 Review、本地 Commit、Push/PR/Merge 人工门禁；
 - [x] Issue/Agent/Attempt 中心 UI；
 - [x] 删除 Feature/WorkItem/Profile/Handoff/Elixir 兼容层；
+- [x] Active Run Reconciliation：刷新运行中 Issue、终止失效/终态 Run、检测 Codex 事件停滞；
+- [x] Workspace 启动清理与 `before_remove` 生命周期 Hook；
+- [x] Turn 间重新确认 Claim，`turn_timeout_ms` 按消息静默时间重置；
+- [x] `WORKFLOW.md` 热更新、运行中配置快照和 Last-Known-Good 回退；
 - [x] 新协议、脚本和自动化回归测试。
 
 ## 5. 后续任务
 
-1. Active Run Reconciliation：Runner 重启后对数据库 Running、真实进程和 Thread 状态做一致性修复。
-2. Workspace Retention：只对终态且超过保留期的 Issue 执行受控清理，运行 `before_remove` 并记录审计。
-3. `WORKFLOW.md` 热更新：新 Claim 使用新快照，运行中 Attempt 保持原配置。
-4. 运行指标：Token、Rate Limit、Turn Count、耗时和错误聚合。
-5. Tracker 标准兼容层：在不恢复本地 WorkItem 模型的前提下，适配标准 Issue Tracker/CLI/API。
+1. Workspace Retention：支持按保留期延迟清理终态 Issue，并把清理结果登记为审计事件。
+2. 运行指标：Token、Rate Limit、Turn Count、耗时和错误聚合。
+3. Tracker 标准兼容层：在不恢复本地 WorkItem 模型的前提下，适配标准 Issue Tracker/CLI/API。
 
 这些任务不能重新引入固定生命周期或阶段角色；它们都应围绕 `Issue → Agent Session → Workspace` 的 Symphony 调度模型扩展。
 

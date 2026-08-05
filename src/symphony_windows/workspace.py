@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -73,6 +74,29 @@ class WorkspaceManager:
 
     async def after_run(self, issue: dict[str, Any], workspace: Path) -> None:
         await self.run_hook("after_run", issue, workspace, ignore_failure=True)
+
+    async def remove(self, issue: dict[str, Any]) -> bool:
+        """Run before_remove and safely remove one terminal Issue workspace."""
+        identifier = str(
+            issue.get("workspace_identifier")
+            or issue.get("identifier")
+            or issue.get("id")
+            or ""
+        )
+        if not identifier.strip():
+            raise WorkspaceError("issue identifier is required for cleanup")
+        root = self.config.root.resolve()
+        workspace = (root / workspace_key(identifier)).resolve()
+        if workspace == root or not workspace.is_relative_to(root):
+            raise WorkspaceError(f"workspace cleanup escapes configured root: {workspace}")
+        if not workspace.exists():
+            return False
+        await self.run_hook("before_remove", issue, workspace, ignore_failure=True)
+        try:
+            shutil.rmtree(workspace, onerror=_remove_readonly)
+        except OSError as error:
+            raise WorkspaceError(f"cannot remove Issue workspace {workspace}: {error}") from error
+        return True
 
     async def run_hook(
         self,
@@ -145,3 +169,8 @@ def workspace_key(identifier: str) -> str:
         sanitized = sanitized[:96].rstrip(". ")
         changed = True
     return f"{sanitized}-{digest}" if changed else sanitized
+
+
+def _remove_readonly(function: Any, path: str, _error: object) -> None:
+    os.chmod(path, stat.S_IWRITE)
+    function(path)

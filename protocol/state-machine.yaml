@@ -24,6 +24,7 @@ transitions:
   - {from: running, to: blocked, event: agent_blocked, actor: agent}
   - {from: blocked, to: ready, event: retry_requested, actor: human}
   - {from: running, to: reviewing, event: agent_completed, actor: agent}
+  - {from: running, to: cancelled, event: cancelled, actor: human}
   - {from: reviewing, to: ready, event: result_rejected, actor: human}
   - {from: reviewing, to: awaiting_publish, event: result_approved, actor: human}
   - {from: awaiting_publish, to: pr_open, event: pull_request_created, actor: human}

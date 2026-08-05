@@ -69,6 +69,46 @@ class ControlPlaneTracker:
             raise TrackerError("issue response must be an object")
         return payload
 
+    async def issues_by_ids(self, issue_ids: list[str]) -> list[dict[str, Any]]:
+        if not issue_ids:
+            return []
+        payload = await self._request(
+            "GET", "/api/issues", params=[("id", issue_id) for issue_id in issue_ids]
+        )
+        if not isinstance(payload, list):
+            raise TrackerError("issue refresh response must be a list")
+        return [row for row in payload if isinstance(row, dict)]
+
+    async def terminal_issues(self) -> list[dict[str, Any]]:
+        payload = await self._request(
+            "GET", "/api/issues", params=[("state", "done"), ("state", "cancelled")]
+        )
+        if not isinstance(payload, list):
+            raise TrackerError("terminal issue response must be a list")
+        return [row for row in payload if isinstance(row, dict)]
+
+    async def refresh_claim(self, lease: ClaimLease) -> bool:
+        """Refresh one live claim before starting another Turn.
+
+        The Control Plane combines tracker and claim state, so only an Issue
+        still marked running and owned by this worker may continue.
+        """
+        self._require_active(lease)
+        try:
+            issue = await self.get_issue(lease.id)
+        except TrackerError as error:
+            if error.status_code == 404:
+                lease.active = False
+                return False
+            raise
+        claim = issue.get("claim")
+        worker_id = claim.get("worker_id") if isinstance(claim, dict) else None
+        lease.issue = issue
+        if issue.get("status") != "running" or worker_id != self.config.worker_id:
+            lease.active = False
+            return False
+        return True
+
     async def claim(self, issue: dict[str, Any], agent_snapshot: dict[str, Any]) -> ClaimLease:
         issue_id = str(issue.get("id", ""))
         version = issue.get("version")

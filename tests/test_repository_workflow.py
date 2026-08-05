@@ -77,3 +77,30 @@ async def test_workspace_is_persistent_and_issue_scoped(tmp_path: Path):
     assert first.path == tmp_path / "workspaces" / workspace_key("ISSUE-001")
     assert second.path == first.path
     assert marker.read_text(encoding="utf-8") == "preserved"
+
+
+async def test_workspace_remove_runs_before_remove_hook(tmp_path: Path):
+    from symphony_windows.workflow import WorkspaceConfig
+
+    manager = WorkspaceManager(WorkspaceConfig(root=tmp_path / "workspaces"))
+    issue = {"id": "ISSUE-REMOVE"}
+    prepared = await manager.prepare(issue)
+    marker = prepared.path / "change.txt"
+    marker.write_text("remove me", encoding="utf-8")
+    calls: list[tuple[str, Path, bool]] = []
+
+    async def record_hook(
+        name: str,
+        _issue: dict[str, object],
+        workspace: Path,
+        *,
+        ignore_failure: bool = False,
+    ) -> None:
+        assert marker.exists()
+        calls.append((name, workspace, ignore_failure))
+
+    manager.run_hook = record_hook  # type: ignore[method-assign]
+    assert await manager.remove(issue) is True
+    assert calls == [("before_remove", prepared.path, True)]
+    assert not prepared.path.exists()
+    assert await manager.remove(issue) is False

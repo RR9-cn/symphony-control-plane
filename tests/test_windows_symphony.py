@@ -104,3 +104,32 @@ async def test_tracker_rejects_unsafe_artifact_path_without_mutating_issue(api):
         assert lease.active is True
     finally:
         await tracker.close()
+
+
+async def test_tracker_refreshes_active_claim_and_lists_terminal_issues(api):
+    await api.post("/api/issues", json=issue_payload())
+    tracker = _tracker(api)
+    try:
+        lease = await tracker.claim(
+            (await tracker.candidates())[0], {"kind": "coding_agent"}
+        )
+        assert await tracker.refresh_claim(lease) is True
+        assert [row["id"] for row in await tracker.issues_by_ids(["ISSUE-001"])] == [
+            "ISSUE-001"
+        ]
+        cancelled = await api.post(
+            "/api/issues/ISSUE-001/status",
+            json={
+                "toStatus": "cancelled",
+                "event": "cancelled",
+                "actorType": "human",
+                "actorId": "operator",
+                "payload": {},
+            },
+        )
+        assert cancelled.status_code == 200
+        assert await tracker.refresh_claim(lease) is False
+        assert lease.active is False
+        assert [row["id"] for row in await tracker.terminal_issues()] == ["ISSUE-001"]
+    finally:
+        await tracker.close()

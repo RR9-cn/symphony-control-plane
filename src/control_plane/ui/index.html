@@ -44,7 +44,7 @@
 
   <dialog id="issue-modal" class="modal">
     <form method="dialog" id="issue-form">
-      <div class="modal-heading"><div><span class="eyebrow">MANUAL INTAKE</span><h2>新建 Issue</h2></div><button class="icon-button" value="cancel">×</button></div>
+      <div class="modal-heading"><div><span class="eyebrow">MANUAL INTAKE</span><h2>新建 Issue</h2></div><button class="icon-button" id="issue-close-button" type="submit" value="cancel" formnovalidate aria-label="关闭">×</button></div>
       <p class="modal-copy">创建后进入 Ready，由一个通用 Agent 负责完整分析、实现和测试。</p>
       <div class="form-grid">
         <label><span>Issue ID</span><input name="id" required pattern="ISSUE-[0-9]{3,}" /></label>
@@ -57,7 +57,7 @@
         <label class="wide"><span>验收标准（每行一条）</span><textarea name="acceptance_criteria" required></textarea></label>
       </div>
       <div class="error" id="issue-error" hidden></div>
-      <div class="modal-actions"><button class="button ghost" value="cancel">取消</button><button class="button" value="create">创建并进入 Ready</button></div>
+      <div class="modal-actions"><button class="button ghost" id="issue-cancel-button" type="submit" value="cancel" formnovalidate>取消</button><button class="button" type="submit" value="create">创建并进入 Ready</button></div>
     </form>
   </dialog>
 
@@ -69,10 +69,10 @@
   </dialog>
 
   <dialog id="token-modal" class="modal small-modal">
-    <form method="dialog" id="token-form"><div class="modal-heading"><h2>API 认证</h2></div><label><span>Bearer Token</span><input type="password" id="token-input" /></label><div class="modal-actions"><button class="button ghost" value="cancel">取消</button><button class="button" value="save">保存</button></div></form>
+    <form method="dialog" id="token-form"><div class="modal-heading"><h2>API 认证</h2></div><label><span>Bearer Token</span><input type="password" id="token-input" /></label><div class="modal-actions"><button class="button ghost" id="token-cancel-button" type="submit" value="cancel" formnovalidate>取消</button><button class="button" type="submit" value="save">保存</button></div></form>
   </dialog>
 
   <div class="toast" id="toast" hidden></div>
-  <script src="/ui/assets/app.js" defer></script>
+  <script src="/ui/assets/app.js?v=20260805-2" defer></script>
 </body>
 </html>

@@ -46,7 +46,7 @@ Claim 使用版本号做原子 compare-and-set。Claim Token 只在成功领取�
 
 ```text
 ready → running
-running → reviewing | needs_human | blocked | retry_queued
+running → reviewing | needs_human | blocked | retry_queued | cancelled
 needs_human → ready
 blocked → ready
 retry_queued → ready

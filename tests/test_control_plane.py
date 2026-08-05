@@ -14,7 +14,11 @@ async def _create_and_claim(api):
 
 
 async def test_dashboard_and_issue_crud(api):
-    assert (await api.get("/")).status_code == 200
+    dashboard = await api.get("/")
+    assert dashboard.status_code == 200
+    assert 'id="issue-cancel-button" type="submit" value="cancel" formnovalidate' in dashboard.text
+    assert 'id="issue-close-button" type="submit" value="cancel" formnovalidate' in dashboard.text
+    assert '/ui/assets/app.js?v=20260805-2' in dashboard.text
     created = await api.post("/api/issues", json=issue_payload())
     assert created.status_code == 201
     assert created.json()["status"] == "ready"
@@ -41,6 +45,28 @@ async def test_claim_is_atomic_and_attempt_is_created(api):
     assert body["issue"]["status"] == "running"
     assert body["attempt"]["attempt_number"] == 1
     assert body["attempt"]["config_snapshot"]["kind"] == "coding_agent"
+
+
+async def test_human_can_cancel_running_issue_without_claim_token(api):
+    lease = await _create_and_claim(api)
+    cancelled = await api.post(
+        "/api/issues/ISSUE-001/status",
+        json={
+            "toStatus": "cancelled",
+            "event": "cancelled",
+            "actorType": "human",
+            "actorId": "operator",
+            "payload": {},
+        },
+    )
+    assert cancelled.status_code == 200, cancelled.text
+    issue = cancelled.json()
+    assert issue["status"] == "cancelled"
+    assert issue["claim"]["worker_id"] is None
+    assert issue["claim"]["expires_at"] is None
+    attempts = (await api.get("/api/issues/ISSUE-001/attempts")).json()
+    assert attempts[0]["id"] == lease["attempt"]["id"]
+    assert attempts[0]["status"] == "cancelled"
 
 
 async def test_single_attempt_supports_multiple_turns_and_completion(api):

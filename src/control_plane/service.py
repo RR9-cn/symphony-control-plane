@@ -69,6 +69,7 @@ TRANSITIONS = {
     ("running", "reviewing", "agent_completed"),
     ("running", "needs_human", "human_input_requested"),
     ("running", "blocked", "agent_blocked"),
+    ("running", "cancelled", "cancelled"),
     ("reviewing", "ready", "result_rejected"),
     ("blocked", "ready", "retry_requested"),
     ("ready", "cancelled", "cancelled"),
@@ -214,7 +215,13 @@ class ControlPlaneService:
             if (from_status, command.to_status, command.event) not in TRANSITIONS:
                 raise InvalidTransitionError(f"transition {from_status} -> {command.to_status} with {command.event} is not allowed")
             if from_status == "running":
-                await self._require_running_claim(issue_id, command.claim_token)
+                human_cancellation = (
+                    command.to_status == "cancelled"
+                    and command.event == "cancelled"
+                    and command.actor_type == "human"
+                )
+                if not human_cancellation:
+                    await self._require_running_claim(issue_id, command.claim_token)
                 await self._finish_attempt(issue_id, command.to_status)
                 actor_id = command.actor_id or issue.claim_worker_id
                 self._clear_claim(issue)
