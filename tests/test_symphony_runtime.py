@@ -90,6 +90,45 @@ async def test_turn_timeout_is_reset_for_each_app_server_message():
     assert observed_timeouts == [12_345, 12_345]
 
 
+async def test_skill_validation_allows_codex_system_skills_in_isolated_home(
+    tmp_path: Path,
+):
+    project_skill = tmp_path / ".codex" / "skills" / "project-skill" / "SKILL.md"
+    project_skill.parent.mkdir(parents=True)
+    project_skill.write_text("# Project Skill\n", encoding="utf-8")
+    system_skill = (
+        tmp_path
+        / ".symphony"
+        / "user-home"
+        / ".codex"
+        / "skills"
+        / ".system"
+        / "openai-docs"
+        / "SKILL.md"
+    )
+    system_skill.parent.mkdir(parents=True)
+    system_skill.write_text("# System Skill\n", encoding="utf-8")
+    server = CodexAppServer(CodexConfig())
+
+    async def skills_list(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "data": [
+                {
+                    "skills": [
+                        {"name": "project-skill", "path": str(project_skill)},
+                        {"name": "openai-docs", "path": str(system_skill)},
+                    ]
+                }
+            ]
+        }
+
+    server._request = skills_list  # type: ignore[method-assign]
+
+    discovered = await server._validate_skills(tmp_path)
+
+    assert [skill["name"] for skill in discovered] == ["project-skill"]
+
+
 async def test_completed_turn_refreshes_issue_before_next_turn(tmp_path: Path):
     server = CodexAppServer(CodexConfig(), on_event=None)
     started_turns: list[str] = []

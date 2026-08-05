@@ -200,7 +200,6 @@ class CodexAppServer:
                     raise CodexError(f"repository Skill escapes .codex/skills: {skill_file}")
                 declared[skill_file.parent.name] = resolved
         found: set[str] = set()
-        unexpected_local: set[str] = set()
         for entry in entries:
             name = entry.get("name")
             raw_path = entry.get("path")
@@ -209,13 +208,9 @@ class CodexAppServer:
             path = Path(raw_path).resolve()
             if name in declared and path == declared[name]:
                 found.add(name)
-            elif path.is_relative_to(workspace.resolve()):
-                unexpected_local.add(f"{name} ({path})")
         missing = set(declared) - found
         if missing:
             raise CodexError("Codex did not discover repository Skills: " + ", ".join(sorted(missing)))
-        if unexpected_local:
-            raise CodexError("Codex discovered workspace Skills outside .codex/skills: " + ", ".join(sorted(unexpected_local)))
         return [
             {"name": name, "path": str(declared[name]), "sha256": _skill_hash(declared[name].parent)}
             for name in sorted(found)
