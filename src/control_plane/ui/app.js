@@ -1,11 +1,12 @@
-const state = { token: sessionStorage.getItem("acp_api_token") || "", issues: [], runtimes: [], workers: [], runner: null, selected: null };
+const state = { token: sessionStorage.getItem("acp_api_token") || "", projects: [], projectId: localStorage.getItem("acp_project_id") || "", issues: [], runtimes: [], workers: [], runner: null, selected: null };
 const $ = (selector) => document.querySelector(selector);
 const dom = {
-  connection: $("#connection"), refresh: $("#refresh-button"), tokenButton: $("#token-button"), newIssue: $("#new-issue-button"),
+  connection: $("#connection"), refresh: $("#refresh-button"), tokenButton: $("#token-button"), newIssue: $("#new-issue-button"), newProject: $("#new-project-button"), projectFilter: $("#project-filter"), projectList: $("#project-list"), projectCount: $("#project-count"),
   runnerState: $("#runner-state"), runnerDetail: $("#runner-detail"), runnerButton: $("#runner-button"),
   total: $("#metric-total"), running: $("#metric-running"), human: $("#metric-human"), done: $("#metric-done"),
   runtimeCount: $("#runtime-count"), runtimeList: $("#runtime-list"), issueList: $("#issue-list"), search: $("#issue-search"),
-  issueModal: $("#issue-modal"), issueForm: $("#issue-form"), issueError: $("#issue-error"), resolveHead: $("#resolve-head"),
+  issueModal: $("#issue-modal"), issueForm: $("#issue-form"), issueError: $("#issue-error"),
+  projectModal: $("#project-modal"), projectForm: $("#project-form"), projectError: $("#project-error"),
   detailModal: $("#detail-modal"), detailId: $("#detail-id"), detailTitle: $("#detail-title"), detailContent: $("#detail-content"), detailActions: $("#detail-actions"), detailError: $("#detail-error"),
   tokenModal: $("#token-modal"), tokenForm: $("#token-form"), tokenInput: $("#token-input"), toast: $("#toast"),
 };
@@ -40,9 +41,11 @@ function badge(status) { return `<span class="badge ${escapeHtml(status)}">${esc
 async function refresh() {
   dom.refresh.disabled = true;
   try {
-    const [health, issues, runtimes, workers, runner] = await Promise.all([
-      api("/health"), api("/api/issues"), api("/api/agent-runtimes"), api("/api/workers"), api("/api/runner-control"),
+    const [health, projects, issues, runtimes, workers, runner] = await Promise.all([
+      api("/health"), api("/api/projects"), api("/api/issues"), api("/api/agent-runtimes"), api("/api/workers"), api("/api/runner-control"),
     ]);
+    state.projects = projects;
+    if (!projects.some((project) => project.id === state.projectId)) state.projectId = projects[0]?.id || "";
     state.issues = issues; state.runtimes = runtimes; state.workers = workers; state.runner = runner;
     dom.connection.textContent = health.auth_enabled && !state.token ? "需要认证" : "已连接";
     render();
@@ -54,45 +57,47 @@ async function refresh() {
 }
 
 function render() {
+  const options = state.projects.map((project) => `<option value="${escapeHtml(project.id)}" ${project.id === state.projectId ? "selected" : ""}>${escapeHtml(project.name)} · ${escapeHtml(project.status)}</option>`).join("");
+  dom.projectFilter.innerHTML = options || '<option value="">请先新增项目</option>';
+  dom.issueForm.elements.project_id.innerHTML = options || '<option value="">请先新增项目</option>';
   dom.total.textContent = state.issues.length;
   dom.running.textContent = state.issues.filter((issue) => issue.status === "running").length;
   dom.human.textContent = state.issues.filter((issue) => ["needs_human", "reviewing", "awaiting_publish", "pr_open"].includes(issue.status)).length;
   dom.done.textContent = state.issues.filter((issue) => issue.status === "done").length;
-  renderRunner(); renderRuntimes(); renderIssues();
+  renderProjects(); renderRunner(); renderRuntimes(); renderIssues();
+}
+
+function renderProjects() {
+  dom.projectCount.textContent = state.projects.length;
+  dom.projectList.innerHTML = state.projects.length ? state.projects.map((project) => { const snapshot = project.current_snapshot; const assets = snapshot?.parsed_config?.project_assets || {}; return `<article class="issue-card" data-project-id="${escapeHtml(project.id)}"><header><strong>${escapeHtml(project.name)} · ${escapeHtml(project.key)}</strong><span class="badge ${project.status === "available" ? "done" : "blocked"}">${escapeHtml(project.status)}</span></header><p>${escapeHtml(project.repository_path)}</p><div class="meta"><span>${escapeHtml(project.default_branch)}</span><span>HEAD ${escapeHtml(short(snapshot?.source_commit))}</span><span>Workflow ${escapeHtml(short(snapshot?.workflow_revision, 8))}</span><span>${assets.skills?.length || 0} Skills</span></div>${project.validation_error ? `<small>${escapeHtml(project.validation_error)}</small>` : ""}<div class="modal-actions"><button class="button ghost" data-project-validate="${escapeHtml(project.id)}">重新校验</button><button class="button ghost" data-project-delete="${escapeHtml(project.id)}" data-project-name="${escapeHtml(project.name)}">删除项目</button></div></article>`; }).join("") : '<div class="empty">尚未登记项目。新增本机 Git 仓库；缺少 WORKFLOW.md 时系统会生成默认模板。</div>';
 }
 
 function renderRunner() {
-  const runner = state.runner || { state: "stopped" };
+  const runner = state.runner?.runtimes?.find((runtime) => runtime.project_id === state.projectId) || { state: "stopped" };
   dom.runnerState.textContent = runner.state;
-  dom.runnerDetail.textContent = runner.process_id ? `PID ${runner.process_id} · ${state.workers.length} 个 Worker 记录` : "未运行";
+  const project = state.projects.find((item) => item.id === state.projectId);
+  dom.runnerDetail.textContent = runner.process_id ? `${project?.name || "项目"} · PID ${runner.process_id}` : project ? `${project.name} · 未运行` : "请先新增项目";
   dom.runnerButton.textContent = ["running", "starting"].includes(runner.state) ? "停止" : "启动";
   dom.runnerButton.dataset.action = ["running", "starting"].includes(runner.state) ? "stop" : "start";
+  dom.runnerButton.disabled = !state.projectId || project?.status !== "available";
 }
 
 function renderRuntimes() {
-  const live = state.runtimes.filter((runtime) => !["done", "cancelled"].includes(runtime.state));
+  const issueIds = new Set(state.issues.filter((issue) => !state.projectId || issue.project_id === state.projectId).map((issue) => issue.id));
+  const live = state.runtimes.filter((runtime) => issueIds.has(runtime.issue_id) && !["done", "cancelled"].includes(runtime.state));
   dom.runtimeCount.textContent = live.length;
   dom.runtimeList.innerHTML = live.length ? live.map((runtime) => `<article class="runtime-card" data-issue-id="${escapeHtml(runtime.issue_id)}"><header><strong>${escapeHtml(runtime.issue_id)}</strong>${badge(runtime.state === "waiting_human" ? "needs_human" : runtime.state)}</header><p>${escapeHtml(runtime.title)}</p><div class="meta"><span>Attempt ${runtime.attempt_number || "—"}</span><span>Turn ${runtime.turn_count || 0}</span><span>Thread ${escapeHtml(short(runtime.thread_id, 10))}</span></div></article>`).join("") : '<div class="empty">暂无活跃 Agent</div>';
 }
 
 function renderIssues() {
   const query = dom.search.value.trim().toLowerCase();
-  const issues = state.issues.filter((issue) => !query || issue.id.toLowerCase().includes(query) || issue.title.toLowerCase().includes(query));
-  dom.issueList.innerHTML = issues.length ? issues.map((issue) => `<article class="issue-card" data-issue-id="${escapeHtml(issue.id)}"><header><strong>${escapeHtml(issue.id)} · P${issue.priority}</strong>${badge(issue.status)}</header><p>${escapeHtml(issue.title)}</p><div class="meta"><span>${escapeHtml(issue.repository.base_branch)}</span><span>${escapeHtml(short(issue.repository.commit))}</span><span>v${issue.version}</span></div></article>`).join("") : '<div class="empty">还没有 Issue</div>';
+  const issues = state.issues.filter((issue) => (!state.projectId || issue.project_id === state.projectId) && (!query || issue.id.toLowerCase().includes(query) || issue.title.toLowerCase().includes(query)));
+  dom.issueList.innerHTML = issues.length ? issues.map((issue) => `<article class="issue-card" data-issue-id="${escapeHtml(issue.id)}"><header><strong>${escapeHtml(issue.id)} · P${issue.priority}</strong>${badge(issue.status)}</header><p>${escapeHtml(issue.title)}</p><div class="meta"><span>${escapeHtml(short(issue.source_commit))}</span><span>Workflow ${escapeHtml(short(issue.workflow_revision, 8))}</span><span>v${issue.version}</span></div></article>`).join("") : '<div class="empty">还没有 Issue</div>';
 }
 
 function suggestedId() { return `ISSUE-${String(Date.now()).slice(-10)}`; }
-function openNewIssue() { dom.issueForm.reset(); dom.issueForm.elements.id.value = suggestedId(); dom.issueError.hidden = true; dom.issueModal.showModal(); }
+function openNewIssue() { if (!state.projects.length) { dom.projectModal.showModal(); return; } dom.issueForm.reset(); dom.issueForm.elements.id.value = suggestedId(); dom.issueForm.elements.project_id.value = state.projectId; dom.issueError.hidden = true; dom.issueModal.showModal(); }
 function openToken() { dom.tokenInput.value = state.token; if (!dom.tokenModal.open) dom.tokenModal.showModal(); }
-
-async function resolveHead() {
-  const path = dom.issueForm.elements.repository_url.value.trim();
-  if (!/^[a-zA-Z]:[\\/]/.test(path) && !/^\\\\/.test(path)) { toast("只有本机绝对路径可以自动读取 HEAD", true); return; }
-  try {
-    const result = await api("/api/repositories/resolve-head", { method: "POST", body: JSON.stringify({ path }) });
-    dom.issueForm.elements.repository_url.value = result.path; dom.issueForm.elements.commit.value = result.commit; toast(`已锁定 ${short(result.commit)}`);
-  } catch (error) { toast(error.message, true); }
-}
 
 function issuePayload() {
   const data = new FormData(dom.issueForm);
@@ -101,8 +106,7 @@ function issuePayload() {
   return {
     id: String(data.get("id") || "").trim().toUpperCase(), title: String(data.get("title") || "").trim(), description: String(data.get("description") || "").trim(),
     priority: Number(data.get("priority") || 2),
-    labels, blocked_by: blockedBy, dispatchable: data.get("dispatchable") === "true",
-    repository: { url: String(data.get("repository_url") || "").trim(), base_branch: String(data.get("base_branch") || "").trim(), commit: String(data.get("commit") || "").trim().toLowerCase() },
+    project_id: String(data.get("project_id") || ""), labels, blocked_by: blockedBy, dispatchable: data.get("dispatchable") === "true",
     acceptance_criteria: String(data.get("acceptance_criteria") || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
   };
 }
@@ -118,7 +122,8 @@ async function openDetail(issueId, show = true) {
     const latest = attempts[0];
     dom.detailContent.innerHTML = `<p class="modal-copy">${escapeHtml(issue.description)}</p><div class="detail-grid">
       <div class="detail-field"><span>Status</span><strong>${escapeHtml(STATUS[issue.status] || issue.status)}</strong></div><div class="detail-field"><span>Priority</span><strong>P${issue.priority}</strong></div>
-      <div class="detail-field"><span>Workspace base</span><strong>${escapeHtml(issue.repository.base_branch)}</strong></div><div class="detail-field"><span>Starting commit</span><strong>${escapeHtml(short(issue.repository.commit, 16))}</strong></div>
+      <div class="detail-field"><span>Project</span><strong>${escapeHtml(state.projects.find((project) => project.id === issue.project_id)?.name || issue.project_id)}</strong></div><div class="detail-field"><span>Starting commit</span><strong>${escapeHtml(short(issue.source_commit, 16))}</strong></div>
+      <div class="detail-field"><span>Workflow revision</span><strong>${escapeHtml(short(issue.workflow_revision, 16))}</strong></div><div class="detail-field"><span>Workspace</span><strong>${escapeHtml(issue.workspace_path)}</strong></div>
       <div class="detail-field"><span>Worker</span><strong>${escapeHtml(issue.claim.worker_id || "—")}</strong></div><div class="detail-field"><span>Thread / Turn</span><strong>${escapeHtml(latest ? `${short(latest.thread_id, 12)} / ${latest.turn_count}` : "—")}</strong></div>
       <div class="detail-field"><span>Dispatchable</span><strong>${issue.dispatchable ? "Yes" : "No"}</strong></div><div class="detail-field"><span>Labels</span><strong>${escapeHtml(issue.labels.join(", ") || "—")}</strong></div>
     </div>
@@ -166,10 +171,13 @@ async function runAction(action, version) {
   } catch (error) { dom.detailError.textContent = error.message; dom.detailError.hidden = false; }
 }
 
-dom.newIssue.addEventListener("click", openNewIssue); dom.tokenButton.addEventListener("click", openToken); dom.refresh.addEventListener("click", refresh); dom.resolveHead.addEventListener("click", resolveHead);
+dom.newIssue.addEventListener("click", openNewIssue); dom.newProject.addEventListener("click", () => { dom.projectForm.reset(); dom.projectError.hidden = true; dom.projectModal.showModal(); }); dom.tokenButton.addEventListener("click", openToken); dom.refresh.addEventListener("click", refresh);
+dom.projectFilter.addEventListener("change", () => { state.projectId = dom.projectFilter.value; localStorage.setItem("acp_project_id", state.projectId); render(); });
+dom.projectList.addEventListener("click", async (event) => { const remove = event.target.closest("[data-project-delete]"); if (remove) { if (!window.confirm(`确认删除项目“${remove.dataset.projectName}”？项目已有 Issue 时系统会拒绝删除。`)) return; try { await api(`/api/projects/${encodeURIComponent(remove.dataset.projectDelete)}`, { method: "DELETE" }); if (state.projectId === remove.dataset.projectDelete) { state.projectId = ""; localStorage.removeItem("acp_project_id"); } toast("项目已删除"); await refresh(); } catch (error) { toast(error.message, true); } return; } const validate = event.target.closest("[data-project-validate]"); if (validate) { try { const project = await api(`/api/projects/${encodeURIComponent(validate.dataset.projectValidate)}/validate`, { method: "POST", body: "{}" }); toast(project.status === "available" ? "Workflow 校验通过" : project.validation_error, project.status !== "available"); await refresh(); } catch (error) { toast(error.message, true); } return; } const card = event.target.closest("[data-project-id]"); if (!card) return; state.projectId = card.dataset.projectId; localStorage.setItem("acp_project_id", state.projectId); render(); });
 dom.search.addEventListener("input", renderIssues);
-dom.runnerButton.addEventListener("click", async () => { try { const action = dom.runnerButton.dataset.action; await api(`/api/runner-control/${action}`, { method: "POST", body: "{}" }); toast(action === "start" ? "Runner 已启动" : "Runner 已停止"); await refresh(); } catch (error) { toast(error.message, true); } });
+dom.runnerButton.addEventListener("click", async () => { try { const action = dom.runnerButton.dataset.action; await api(`/api/projects/${encodeURIComponent(state.projectId)}/runtime/${action}`, { method: "POST", body: "{}" }); toast(action === "start" ? "项目 Runtime 已启动" : "项目 Runtime 已停止"); await refresh(); } catch (error) { toast(error.message, true); } });
 dom.issueForm.addEventListener("submit", async (event) => { event.preventDefault(); if (event.submitter?.value === "cancel") { dom.issueModal.close(); return; } try { const issue = await api("/api/issues", { method: "POST", body: JSON.stringify(issuePayload()) }); dom.issueModal.close(); toast(`已创建 ${issue.id}`); await refresh(); } catch (error) { dom.issueError.textContent = error.message; dom.issueError.hidden = false; } });
+dom.projectForm.addEventListener("submit", async (event) => { event.preventDefault(); if (event.submitter?.value === "cancel") { dom.projectModal.close(); return; } const data = new FormData(dom.projectForm); try { const project = await api("/api/projects", { method: "POST", body: JSON.stringify({ key: String(data.get("key") || "").trim(), name: String(data.get("name") || "").trim(), repository_path: String(data.get("repository_path") || "").trim(), default_branch: String(data.get("default_branch") || "").trim(), workflow_path: String(data.get("workflow_path") || "").trim(), enabled: true, bootstrap_workflow: true }) }); dom.projectModal.close(); state.projectId = project.id; localStorage.setItem("acp_project_id", project.id); toast(project.status === "available" ? "项目已登记，可启动 Runtime" : project.validation_error || "项目已登记，提交生成的 WORKFLOW.md 后重新校验", project.status !== "available"); await refresh(); } catch (error) { dom.projectError.textContent = error.message; dom.projectError.hidden = false; } });
 dom.tokenForm.addEventListener("submit", (event) => { event.preventDefault(); if (event.submitter?.value === "cancel") { dom.tokenModal.close(); return; } state.token = dom.tokenInput.value.trim(); if (state.token) sessionStorage.setItem("acp_api_token", state.token); else sessionStorage.removeItem("acp_api_token"); dom.tokenModal.close(); refresh(); });
 $("#issue-close-button").addEventListener("click", () => dom.issueModal.close());
 $("#issue-cancel-button").addEventListener("click", () => dom.issueModal.close());
@@ -179,5 +187,5 @@ dom.runtimeList.addEventListener("click", (event) => { const card = event.target
 dom.detailActions.addEventListener("click", (event) => { const button = event.target.closest("[data-action]"); if (button) runAction(button.dataset.action, button.dataset.version); });
 dom.detailContent.addEventListener("click", async (event) => { const button = event.target.closest("[data-resolve]"); if (!button) return; const response = dom.detailContent.querySelector(`[data-decision-response="${CSS.escape(button.dataset.resolve)}"]`).value.trim(); if (!response) return; try { await api(`/api/issues/${encodeURIComponent(state.selected)}/decisions`, { method: "POST", body: JSON.stringify({ action: "resolve", decision_id: button.dataset.resolve, response, actor_id: "control-plane-ui" }) }); toast("决定已提交，Issue 已恢复 Ready"); await refresh(); } catch (error) { toast(error.message, true); } });
 $("#detail-close").addEventListener("click", () => { state.selected = null; dom.detailModal.close(); });
-window.setInterval(() => { if (!document.hidden && !dom.issueModal.open && !dom.tokenModal.open) refresh(); }, 5000);
+window.setInterval(() => { if (!document.hidden && !dom.issueModal.open && !dom.projectModal.open && !dom.tokenModal.open) refresh(); }, 5000);
 refresh();

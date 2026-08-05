@@ -22,13 +22,13 @@ def test_agent_config_controls_codex_as_one_runtime(monkeypatch):
     codex = config.codex_config(CodexConfig())
     assert codex.thread_sandbox == "workspace-write"
     assert codex.turn_sandbox_policy == {"type": "workspaceWrite", "networkAccess": False}
-    assert codex.allowed_skills == config.skills
+    assert not hasattr(codex, "allowed_skills")
     assert codex.model == "gpt-test"
     assert codex.effort == "high"
 
 
 def test_agent_snapshot_contains_no_role_or_stage():
-    snapshot = AgentConfig(skills=("one", "two"), max_turns=7).snapshot()
+    snapshot = AgentConfig(max_turns=7).snapshot()
     assert snapshot["kind"] == "coding_agent"
     assert snapshot["max_turns"] == 7
     assert "role" not in snapshot

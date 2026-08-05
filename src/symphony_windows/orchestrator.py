@@ -4,6 +4,8 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
+import subprocess
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -12,7 +14,6 @@ from typing import Any, Callable
 
 from symphony_windows.attempt_events import normalize_codex_event
 from symphony_windows.codex import CodexAppServer, CodexError, CodexRunResult
-from symphony_windows.skill import SkillManager
 from symphony_windows.tracker import (
     ClaimConflict,
     ClaimLease,
@@ -43,7 +44,6 @@ class RunningEntry:
     workflow: Workflow
     tracker: TrackerAdapter
     workspace_manager: WorkspaceManager
-    skill_manager: SkillManager
     started_at: float
     scheduling_state: str
     task: asyncio.Task[AttemptOutcome] | None = None
@@ -65,17 +65,14 @@ class WindowsSymphony:
         *,
         tracker: TrackerAdapter | None = None,
         workspace_manager: WorkspaceManager | None = None,
-        skill_manager: SkillManager | None = None,
         codex_factory: CodexFactory = CodexAppServer,
     ) -> None:
         self.workflow = workflow
         self.tracker = tracker or create_tracker_adapter(workflow.tracker)
         self.workspace_manager = workspace_manager or WorkspaceManager(workflow.workspace)
-        self.skill_manager = skill_manager or SkillManager(workflow.skill_repository, workflow.agent)
         self.codex_factory = codex_factory
         self._tracker_injected = tracker is not None
         self._workspace_injected = workspace_manager is not None
-        self._skill_injected = skill_manager is not None
         self._owns_tracker = tracker is None
         self._running: dict[str, RunningEntry] = {}
         self._retry_attempts: dict[str, int] = {}
@@ -140,16 +137,26 @@ class WindowsSymphony:
             ):
                 continue
             try:
-                lease = await self.tracker.claim(issue, self.skill_manager.snapshot())
+                lease = await self.tracker.claim(
+                    issue,
+                    {
+                        **self.workflow.agent.snapshot(),
+                        "project_id": self.workflow.tracker.project_id,
+                        "workflow_path": str(self.workflow.path),
+                    },
+                )
             except ClaimConflict:
                 continue
+            claimed_workflow = load_workflow(
+                self.workflow.path,
+                source_override=lease.workflow_content or self.workflow.path.read_text(encoding="utf-8"),
+            )
             entry = RunningEntry(
                 issue=_normalize_issue(lease.issue),
                 lease=lease,
-                workflow=self.workflow,
+                workflow=claimed_workflow,
                 tracker=self.tracker,
-                workspace_manager=self.workspace_manager,
-                skill_manager=self.skill_manager,
+                workspace_manager=WorkspaceManager(claimed_workflow.workspace),
                 started_at=time.monotonic(),
                 scheduling_state=scheduling_state,
             )
@@ -206,14 +213,11 @@ class WindowsSymphony:
         lease = entry.lease
         issue_id = lease.id
         workspace = None
-        skills_installed = False
         heartbeat_task: asyncio.Task[None] | None = None
         codex_task: asyncio.Task[CodexRunResult] | None = None
         try:
             issue = entry.issue
             workspace = (await entry.workspace_manager.prepare(issue)).path
-            entry.skill_manager.install(workspace)
-            skills_installed = True
             await entry.workspace_manager.before_run(issue, workspace)
             attempt_number = lease.attempt.get("attempt_number")
             attempt = (
@@ -239,7 +243,6 @@ class WindowsSymphony:
                     sorted(
                         {
                             *entry.workflow.tracker.secret_environment_names,
-                            *entry.skill_manager.secret_environment_names(),
                         }
                     )
                 ),
@@ -321,9 +324,6 @@ class WindowsSymphony:
                 with contextlib.suppress(asyncio.CancelledError):
                     await heartbeat_task
             if workspace is not None:
-                if skills_installed:
-                    with contextlib.suppress(WorkflowError, OSError):
-                        entry.skill_manager.restore(workspace)
                 with contextlib.suppress(WorkspaceError):
                     await entry.workspace_manager.after_run(
                         _normalize_issue(lease.issue), workspace
@@ -422,7 +422,6 @@ class WindowsSymphony:
     async def _ensure_initialized(self) -> None:
         if self._initialized:
             return
-        await self.skill_manager.initialize()
         try:
             terminal = await self.tracker.fetch_issues_by_states(
                 list(self.workflow.tracker.terminal_states)
@@ -443,6 +442,7 @@ class WindowsSymphony:
         created_tracker = False
         update_tracker_config = False
         try:
+            _require_committed_project_contract(self.workflow.path)
             candidate = load_workflow(self.workflow.path)
             provider_changed = _tracker_provider_identity(
                 candidate.tracker
@@ -463,12 +463,6 @@ class WindowsSymphony:
                     )
                 else:
                     update_tracker_config = True
-            candidate_skill_manager = self.skill_manager
-            if not self._skill_injected:
-                candidate_skill_manager = SkillManager(
-                    candidate.skill_repository, candidate.agent
-                )
-                await candidate_skill_manager.initialize()
             candidate_workspace_manager = self.workspace_manager
             if not self._workspace_injected:
                 candidate_workspace_manager = WorkspaceManager(candidate.workspace)
@@ -488,7 +482,6 @@ class WindowsSymphony:
         self.tracker = candidate_tracker
         if update_tracker_config:
             self.tracker.config = candidate.tracker
-        self.skill_manager = candidate_skill_manager
         self.workspace_manager = candidate_workspace_manager
         self._workflow_signature = signature
         self._last_workflow_error = None
@@ -626,6 +619,28 @@ def _tracker_provider_identity(config: Any) -> tuple[object, ...]:
         config.request_timeout_seconds,
         config.secret_environment_names,
     )
+
+
+def _require_committed_project_contract(workflow_path: Path) -> None:
+    repository_value = os.getenv("SYMPHONY_PROJECT_REPOSITORY")
+    if not repository_value:
+        return
+    repository = Path(repository_value).resolve()
+    try:
+        relative_workflow = workflow_path.resolve().relative_to(repository).as_posix()
+    except ValueError as error:
+        raise WorkflowError("project WORKFLOW.md escapes the registered repository") from error
+    result = subprocess.run(
+        ["git", "-C", str(repository), "status", "--porcelain", "--", relative_workflow, "AGENTS.md", ".codex/skills"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise WorkflowError(result.stderr.strip() or "cannot validate project contract revision")
+    if result.stdout.strip():
+        raise WorkflowError("WORKFLOW.md, AGENTS.md and .codex/skills must be committed before hot reload")
 
 
 def _file_signature(path: Path) -> tuple[int, int] | None:

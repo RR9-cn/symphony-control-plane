@@ -4,23 +4,14 @@
   "title": "Fshows Symphony Issue",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "title", "description", "priority", "repository", "acceptance_criteria"],
+  "required": ["id", "project_id", "title", "description", "priority", "acceptance_criteria"],
   "properties": {
     "id": {"type": "string", "minLength": 1, "maxLength": 64},
+    "project_id": {"type": "string", "minLength": 1, "maxLength": 36},
     "identifier": {"type": "string", "minLength": 1, "maxLength": 128},
     "title": {"type": "string", "minLength": 1, "maxLength": 200},
     "description": {"type": "string", "minLength": 1},
     "priority": {"type": "integer", "minimum": 0, "maximum": 4},
-    "repository": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["url", "base_branch", "commit"],
-      "properties": {
-        "url": {"type": "string", "minLength": 1},
-        "base_branch": {"type": "string", "minLength": 1},
-        "commit": {"type": "string", "pattern": "^[a-fA-F0-9]{40}$"}
-      }
-    },
     "acceptance_criteria": {
       "type": "array",
       "minItems": 1,

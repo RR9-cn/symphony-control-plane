@@ -22,6 +22,7 @@ class TrackerConfig:
     endpoint: str
     token: str
     worker_id: str
+    project_id: str
     kind: str = "fshows_control_plane"
     required_labels: tuple[str, ...] = ()
     active_states: tuple[str, ...] = ("ready", "running")
@@ -47,14 +48,6 @@ class WorkspaceConfig:
 
 
 @dataclass(frozen=True)
-class SkillRepositoryConfig:
-    url: str
-    revision: str
-    skills_path: str
-    cache_root: Path
-
-
-@dataclass(frozen=True)
 class CodexConfig:
     command: str = "codex app-server"
     approval_policy: str | dict[str, Any] = "never"
@@ -65,7 +58,6 @@ class CodexConfig:
     stall_timeout_ms: int = 300_000
     model: str | None = None
     effort: str | None = None
-    allowed_skills: tuple[str, ...] = ()
     isolate_user_home: bool = True
 
 
@@ -75,7 +67,6 @@ class AgentConfig:
     max_concurrent_agents_by_state: dict[str, int] = field(default_factory=dict)
     max_retry_backoff_ms: int = 300_000
     max_turns: int = 20
-    skills: tuple[str, ...] = ()
     sandbox: str = "danger-full-access"
     network_access: bool = True
     model: str | None = None
@@ -84,7 +75,6 @@ class AgentConfig:
     def snapshot(self) -> dict[str, Any]:
         return {
             "kind": "coding_agent",
-            "skills": list(self.skills),
             "sandbox": self.sandbox,
             "network_access": self.network_access,
             "model": self.model,
@@ -105,7 +95,6 @@ class AgentConfig:
         return replace(
             base, thread_sandbox=self.sandbox, turn_sandbox_policy=policy,
             model=self.model or base.model, effort=self.effort or base.effort,
-            allowed_skills=self.skills,
         )
 
 
@@ -115,7 +104,6 @@ class Workflow:
     tracker: TrackerConfig
     polling_interval_ms: int
     workspace: WorkspaceConfig
-    skill_repository: SkillRepositoryConfig
     agent: AgentConfig
     codex: CodexConfig
     prompt_template: str
@@ -128,12 +116,22 @@ class Workflow:
             raise WorkflowError(f"prompt rendering failed: {error}") from error
 
 
-def load_workflow(path: str | Path) -> Workflow:
+def load_workflow(
+    path: str | Path,
+    *,
+    source_override: str | None = None,
+    token_override: str | None = None,
+    worker_id_override: str | None = None,
+    project_id_override: str | None = None,
+) -> Workflow:
     workflow_path = Path(path).expanduser().resolve()
-    try:
-        source = workflow_path.read_text(encoding="utf-8")
-    except OSError as error:
-        raise WorkflowError(f"cannot read workflow file: {workflow_path}") from error
+    if source_override is None:
+        try:
+            source = workflow_path.read_text(encoding="utf-8")
+        except OSError as error:
+            raise WorkflowError(f"cannot read workflow file: {workflow_path}") from error
+    else:
+        source = source_override
     front, prompt = _parse_front_matter(source)
     if not prompt.strip():
         raise WorkflowError("WORKFLOW.md prompt body is required")
@@ -144,9 +142,13 @@ def load_workflow(path: str | Path) -> Workflow:
     provider = _mapping(tracker_data.get("provider"), "tracker.provider")
     endpoint = _endpoint(str(provider.get("endpoint", "http://127.0.0.1:8080")), provider.get("allow_insecure_http") is True)
     token, token_env = _resolve_secret(provider.get("token"), "CONTROL_PLANE_TOKEN")
+    token = token_override or token
     if not token:
         raise WorkflowError("tracker provider token is required")
-    worker_id = _resolve(provider.get("worker_id")) or os.getenv("SYMPHONY_WORKER_ID") or f"windows-{socket.gethostname()}-{os.getpid()}"
+    project_id = project_id_override or os.getenv("SYMPHONY_PROJECT_ID")
+    if not project_id:
+        raise WorkflowError("SYMPHONY_PROJECT_ID is required")
+    worker_id = worker_id_override or os.getenv("SYMPHONY_WORKER_ID") or _resolve(provider.get("worker_id")) or f"windows-{socket.gethostname()}-{os.getpid()}"
     required_labels = _normalized_strings(
         tracker_data.get("required_labels", []), "tracker.required_labels"
     )
@@ -168,6 +170,7 @@ def load_workflow(path: str | Path) -> Workflow:
         )
     tracker = TrackerConfig(
         kind=str(tracker_data["kind"]), endpoint=endpoint, token=token, worker_id=worker_id,
+        project_id=project_id,
         required_labels=required_labels, active_states=active_states,
         terminal_states=terminal_states,
         lease_seconds=_integer(provider.get("lease_seconds", 300), 10, 3600, "tracker.provider.lease_seconds"),
@@ -185,18 +188,9 @@ def load_workflow(path: str | Path) -> Workflow:
         timeout_ms=_integer(hooks_data.get("timeout_ms", 60000), 1, 3600000, "hooks.timeout_ms"),
     )
 
-    skill_data = _mapping(front.get("skill_repository"), "skill_repository")
-    skill_repository = SkillRepositoryConfig(
-        url=_required(skill_data.get("url"), "skill_repository.url"),
-        revision=_required(skill_data.get("revision"), "skill_repository.revision"),
-        skills_path=_relative(_required(skill_data.get("skills_path"), "skill_repository.skills_path")),
-        cache_root=_path(_resolve(skill_data.get("cache_root")), workflow_path.parent, Path(tempfile.gettempdir()) / "fshows-symphony-skills"),
-    )
-
     if "agent" not in front:
         raise WorkflowError("agent section is required")
     agent_data = _mapping(front.get("agent"), "agent")
-    skills = _strings(agent_data.get("skills", []), "agent.skills")
     sandbox = str(agent_data.get("sandbox", "danger-full-access"))
     if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
         raise WorkflowError("agent.sandbox is invalid")
@@ -207,7 +201,7 @@ def load_workflow(path: str | Path) -> Workflow:
         ),
         max_retry_backoff_ms=_integer(agent_data.get("max_retry_backoff_ms", 300000), 1000, 86400000, "agent.max_retry_backoff_ms"),
         max_turns=_integer(agent_data.get("max_turns", 20), 1, 100, "agent.max_turns"),
-        skills=skills, sandbox=sandbox,
+        sandbox=sandbox,
         network_access=_boolean(agent_data.get("network_access", True), "agent.network_access"),
         model=_optional(agent_data.get("model")), effort=_optional(agent_data.get("effort")),
     )
@@ -229,7 +223,7 @@ def load_workflow(path: str | Path) -> Workflow:
     return Workflow(
         path=workflow_path, tracker=tracker,
         polling_interval_ms=_integer(polling.get("interval_ms", 30000), 100, 3600000, "polling.interval_ms"),
-        workspace=WorkspaceConfig(root=root, hooks=hooks), skill_repository=skill_repository,
+        workspace=WorkspaceConfig(root=root, hooks=hooks),
         agent=agent, codex=codex, prompt_template=prompt,
         required_environment=tuple(sorted(name for name in [token_env] if name)),
     )

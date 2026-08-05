@@ -1,62 +1,35 @@
 import asyncio
 import contextlib
 import hmac
-import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, AsyncIterator
 
 from fastapi import Depends, FastAPI, Query, Request, status
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.config import Settings
 from control_plane.database import Database
-from control_plane.errors import ControlPlaneError, RepositoryResolutionError
+from control_plane.errors import ConflictError, ControlPlaneError, NotFoundError
+from control_plane.models import Project
+from control_plane.project_service import ProjectService
 from control_plane.runner_supervisor import RunnerSupervisor
 from control_plane.schemas import (
     AgentAttemptEventCreate, AgentAttemptEventView, AgentAttemptView, AgentRuntimeView,
     ArtifactCreate, ArtifactView, AttemptContextUpdate, ClaimRequest, ClaimResult,
     DecisionCommand, DecisionView, EventCreate, EventView, HeartbeatRequest,
     IssueCreate, IssueDeliveryCommand, IssuePatch, IssueView, MaintenanceResult,
-    ReleaseRequest, RepositoryHeadRequest, RepositoryHeadView, RunnerControlView,
+    ProjectCreate, ProjectPatch, ProjectRuntimeView, ProjectView,
+    ReleaseRequest, RunnerControlView, WorkflowSnapshotView,
     StatusTransitionRequest, WorkerHeartbeat, WorkerRegistration, WorkerView,
 )
 from control_plane.service import ControlPlaneService
 
 
 UI_ROOT = Path(__file__).with_name("ui")
-COMMIT_PATTERN = re.compile(r"^[a-f0-9]{40}$")
-
-
-async def _resolve_local_repository_head(path_value: str) -> RepositoryHeadView:
-    candidate = Path(path_value.strip())
-    if not candidate.is_absolute():
-        raise RepositoryResolutionError("repository path must be an absolute local path")
-    try:
-        resolved = candidate.resolve(strict=True)
-    except OSError as error:
-        raise RepositoryResolutionError("repository path does not exist") from error
-    if not resolved.is_dir():
-        raise RepositoryResolutionError("repository path must be a directory")
-    process = await asyncio.create_subprocess_exec(
-        "git", "-C", str(resolved), "rev-parse", "--verify", "HEAD^{commit}",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
-    except TimeoutError as error:
-        process.kill()
-        await process.communicate()
-        raise RepositoryResolutionError("timed out while reading repository HEAD") from error
-    commit = stdout.decode(errors="replace").strip().lower()
-    if process.returncode != 0 or not COMMIT_PATTERN.fullmatch(commit):
-        detail = stderr.decode(errors="replace").strip()
-        raise RepositoryResolutionError(detail or "path is not a Git repository with a valid HEAD")
-    return RepositoryHeadView(path=str(resolved), commit=commit)
-
-
 async def _lease_sweeper(app: FastAPI) -> None:
     while True:
         await asyncio.sleep(app.state.settings.lease_sweep_interval_seconds)
@@ -69,6 +42,23 @@ async def _lease_sweeper(app: FastAPI) -> None:
             app.state.lease_sweeper_failures += 1
 
 
+async def _project_refresher(app: FastAPI) -> None:
+    while True:
+        await asyncio.sleep(max(2.0, app.state.settings.lease_sweep_interval_seconds))
+        try:
+            async with app.state.database.sessions() as session:
+                projects = (await session.scalars(select(Project).where(Project.enabled.is_(True)))).all()
+                for project in projects:
+                    await ProjectService(
+                        session,
+                        app.state.settings.api_token.get_secret_value() if app.state.settings.api_token else None,
+                    ).validate(project.id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            app.state.project_refresh_failures += 1
+
+
 def create_app(settings: Settings | None = None, database: Database | None = None) -> FastAPI:
     resolved_settings = settings or Settings()
     resolved_database = database or Database(resolved_settings)
@@ -77,9 +67,13 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         task = asyncio.create_task(_lease_sweeper(app)) if resolved_settings.enable_lease_sweeper else None
+        project_task = asyncio.create_task(_project_refresher(app))
         if resolved_settings.managed_runner_autostart:
-            with contextlib.suppress(ControlPlaneError):
-                await runner_supervisor.start()
+            async with resolved_database.sessions() as session:
+                projects = (await session.scalars(select(Project).where(Project.enabled.is_(True), Project.status == "available"))).all()
+            for project in projects:
+                with contextlib.suppress(ControlPlaneError):
+                    await runner_supervisor.start_project(project)
         try:
             yield
         finally:
@@ -88,12 +82,16 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+            project_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await project_task
             await resolved_database.dispose()
 
     app = FastAPI(title="Fshows Symphony Control Plane", version="0.2.0", lifespan=lifespan)
     app.state.settings = resolved_settings
     app.state.database = resolved_database
     app.state.lease_sweeper_failures = 0
+    app.state.project_refresh_failures = 0
     app.state.runner_supervisor = runner_supervisor
 
     @app.middleware("http")
@@ -115,6 +113,10 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
 
     Session = Annotated[AsyncSession, Depends(get_session)]
     service = lambda session: ControlPlaneService(session, resolved_settings)  # noqa: E731
+    project_service = lambda session: ProjectService(  # noqa: E731
+        session,
+        resolved_settings.api_token.get_secret_value() if resolved_settings.api_token else None,
+    )
 
     app.mount("/ui/assets", StaticFiles(directory=UI_ROOT), name="ui-assets")
 
@@ -128,19 +130,19 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
 
     @app.get("/health")
     async def health() -> dict[str, object]:
-        return {"status": "ok", "database": "sqlite", "auth_enabled": resolved_settings.api_token is not None, "lease_sweeper_failures": app.state.lease_sweeper_failures, "managed_runner": runner_supervisor.view().state}
+        return {"status": "ok", "database": "sqlite", "auth_enabled": resolved_settings.api_token is not None, "lease_sweeper_failures": app.state.lease_sweeper_failures, "project_refresh_failures": app.state.project_refresh_failures, "managed_runner": runner_supervisor.view().state}
 
     @app.post("/api/issues", response_model=IssueView, status_code=status.HTTP_201_CREATED)
     async def create_issue(command: IssueCreate, session: Session) -> IssueView:
         return await service(session).create_issue(command)
 
     @app.get("/api/issues", response_model=list[IssueView])
-    async def list_issues(session: Session, statuses: list[str] | None = Query(default=None, alias="state"), issue_ids: list[str] | None = Query(default=None, alias="id")) -> list[IssueView]:
-        return await service(session).list_issues(statuses, issue_ids)
+    async def list_issues(session: Session, statuses: list[str] | None = Query(default=None, alias="state"), issue_ids: list[str] | None = Query(default=None, alias="id"), project_id: str | None = None) -> list[IssueView]:
+        return await service(session).list_issues(statuses, issue_ids, project_id)
 
     @app.get("/api/issues/candidates", response_model=list[IssueView])
-    async def candidates(session: Session, limit: int = Query(default=100, ge=1, le=500)) -> list[IssueView]:
-        return await service(session).candidates(limit)
+    async def candidates(session: Session, project_id: str, limit: int = Query(default=100, ge=1, le=500)) -> list[IssueView]:
+        return await service(session).candidates(project_id, limit)
 
     @app.get("/api/issues/{issue_id}", response_model=IssueView)
     async def get_issue(issue_id: str, session: Session) -> IssueView:
@@ -154,9 +156,64 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
     async def deliver_issue(issue_id: str, command: IssueDeliveryCommand, session: Session) -> IssueView:
         return await service(session).deliver_issue(issue_id, command)
 
-    @app.post("/api/repositories/resolve-head", response_model=RepositoryHeadView)
-    async def resolve_repository_head(command: RepositoryHeadRequest) -> RepositoryHeadView:
-        return await _resolve_local_repository_head(command.path)
+    @app.post("/api/projects", response_model=ProjectView, status_code=status.HTTP_201_CREATED)
+    async def create_project(command: ProjectCreate, session: Session) -> ProjectView:
+        result = await project_service(session).create(command)
+        if resolved_settings.managed_runner_autostart and result.enabled and result.status == "available":
+            project = await session.get(Project, result.id)
+            if project is not None:
+                with contextlib.suppress(ControlPlaneError):
+                    await runner_supervisor.start_project(project)
+        return result
+
+    @app.get("/api/projects", response_model=list[ProjectView])
+    async def list_projects(session: Session) -> list[ProjectView]:
+        return await project_service(session).list()
+
+    @app.get("/api/projects/{project_id}", response_model=ProjectView)
+    async def get_project(project_id: str, session: Session) -> ProjectView:
+        return await project_service(session).get(project_id)
+
+    @app.patch("/api/projects/{project_id}", response_model=ProjectView)
+    async def patch_project(project_id: str, command: ProjectPatch, session: Session) -> ProjectView:
+        restart = command.repository_path is not None or command.workflow_path is not None
+        if restart or command.enabled is False:
+            workers = await service(session).list_workers(project_id)
+            await session.rollback()
+            for worker in workers:
+                with contextlib.suppress(ControlPlaneError):
+                    await service(session).request_worker_stop(worker.id)
+            with contextlib.suppress(ControlPlaneError):
+                await runner_supervisor.stop_project(project_id)
+        result = await project_service(session).patch(project_id, command)
+        if restart and resolved_settings.managed_runner_autostart and result.status == "available":
+            project = await session.get(Project, project_id)
+            assert project is not None
+            await runner_supervisor.start_project(project)
+        return result
+
+    @app.post("/api/projects/{project_id}/validate", response_model=ProjectView)
+    async def validate_project(project_id: str, session: Session) -> ProjectView:
+        return await project_service(session).validate(project_id)
+
+    @app.get("/api/projects/{project_id}/workflow-snapshots", response_model=list[WorkflowSnapshotView])
+    async def project_snapshots(project_id: str, session: Session) -> list[WorkflowSnapshotView]:
+        return await project_service(session).snapshots(project_id)
+
+    @app.delete("/api/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+    async def delete_project(project_id: str, session: Session) -> Response:
+        await project_service(session).assert_deletable(project_id)
+        await session.rollback()
+        workers = await service(session).list_workers(project_id)
+        await session.rollback()
+        for worker in workers:
+            with contextlib.suppress(ControlPlaneError):
+                await service(session).request_worker_stop(worker.id)
+        with contextlib.suppress(ControlPlaneError):
+            await runner_supervisor.stop_project(project_id)
+        await project_service(session).delete(project_id)
+        runner_supervisor.forget_project(project_id)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.post("/api/issues/{issue_id}/claim", response_model=ClaimResult)
     async def claim(issue_id: str, command: ClaimRequest, session: Session) -> ClaimResult:
@@ -215,8 +272,8 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
         return await service(session).register_worker(command)
 
     @app.get("/api/workers", response_model=list[WorkerView])
-    async def list_workers(session: Session) -> list[WorkerView]:
-        return await service(session).list_workers()
+    async def list_workers(session: Session, project_id: str | None = None) -> list[WorkerView]:
+        return await service(session).list_workers(project_id)
 
     @app.post("/api/workers/{worker_id}/heartbeat", response_model=WorkerView)
     async def heartbeat_worker(worker_id: str, command: WorkerHeartbeat, session: Session) -> WorkerView:
@@ -235,18 +292,54 @@ def create_app(settings: Settings | None = None, database: Database | None = Non
         return await service(session).list_agent_runtimes()
 
     @app.get("/api/runner-control", response_model=RunnerControlView)
-    async def runner_control_status() -> RunnerControlView:
-        return runner_supervisor.view()
+    async def runner_control_status(session: Session) -> RunnerControlView:
+        projects = (await session.scalars(select(Project))).all()
+        result = runner_supervisor.view()
+        result.registered_projects = len(projects)
+        result.available_projects = sum(project.status == "available" for project in projects)
+        result.invalid_projects = sum(project.status == "invalid" for project in projects)
+        return result
 
-    @app.post("/api/runner-control/start", response_model=RunnerControlView)
-    async def start_managed_runner() -> RunnerControlView:
-        return await runner_supervisor.start()
+    @app.get("/api/projects/{project_id}/runtime", response_model=ProjectRuntimeView)
+    async def project_runtime(project_id: str, session: Session) -> ProjectRuntimeView:
+        with contextlib.suppress(NotFoundError):
+            return runner_supervisor.project_view(project_id)
+        project = await session.get(Project, project_id)
+        if project is None:
+            raise NotFoundError(f"project not found: {project_id}")
+        return ProjectRuntimeView(
+            project_id=project.id,
+            project_key=project.key,
+            state="stopped",
+            process_id=None,
+            worker_id=f"windows-symphony:{project.key}",
+            workflow=str((Path(project.repository_path) / project.workflow_path).resolve()),
+            started_at=None,
+            last_exit_code=None,
+            recent_logs=[],
+        )
 
-    @app.post("/api/runner-control/stop", response_model=RunnerControlView)
-    async def stop_managed_runner(session: Session) -> RunnerControlView:
-        with contextlib.suppress(ControlPlaneError):
-            await service(session).request_worker_stop(resolved_settings.managed_runner_worker_id)
-        return await runner_supervisor.stop()
+    @app.post("/api/projects/{project_id}/runtime/start", response_model=ProjectRuntimeView)
+    async def start_project_runtime(project_id: str, session: Session) -> ProjectRuntimeView:
+        project = await session.get(Project, project_id)
+        if project is None:
+            raise NotFoundError(f"project not found: {project_id}")
+        if not project.enabled or project.status != "available":
+            await project_service(session).validate(project_id)
+            project = await session.get(Project, project_id)
+        assert project is not None
+        if not project.enabled or project.status != "available":
+            raise ConflictError("project must be enabled and valid before starting its Runtime")
+        return await runner_supervisor.start_project(project)
+
+    @app.post("/api/projects/{project_id}/runtime/stop", response_model=ProjectRuntimeView)
+    async def stop_project_runtime(project_id: str, session: Session) -> ProjectRuntimeView:
+        workers = await service(session).list_workers(project_id)
+        await session.rollback()
+        for worker in workers:
+            with contextlib.suppress(ControlPlaneError):
+                await service(session).request_worker_stop(worker.id)
+        return await runner_supervisor.stop_project(project_id)
 
     @app.post("/api/maintenance/tick", response_model=MaintenanceResult)
     async def maintenance_tick(session: Session) -> MaintenanceResult:

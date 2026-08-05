@@ -23,7 +23,7 @@ def test_repository_workflow_is_one_generic_agent(monkeypatch):
     assert workflow.agent.max_concurrent_agents >= 1
     assert workflow.agent.max_turns > 1
     assert workflow.agent.sandbox == "danger-full-access"
-    assert "fskill-analysis-tech" in workflow.agent.skills
+    assert not hasattr(workflow, "skill_repository")
     assert not hasattr(workflow, "agent_profiles")
     prompt = workflow.render_prompt(
         {
@@ -32,7 +32,9 @@ def test_repository_workflow_is_one_generic_agent(monkeypatch):
             "title": "Implement endpoint",
             "description": "Build it",
             "acceptance_criteria": ["Tests pass"],
-            "repository": {"url": "repo", "base_branch": "main", "commit": "1" * 40},
+            "project_id": "unit-test-project",
+            "source_commit": "1" * 40,
+            "workflow_revision": "2" * 64,
         },
         2,
     )
@@ -67,7 +69,8 @@ async def test_workspace_is_persistent_and_issue_scoped(tmp_path: Path):
     manager = WorkspaceManager(WorkspaceConfig(root=tmp_path / "workspaces"))
     issue = {
         "id": "ISSUE-001",
-        "repository": {"url": str(source), "base_branch": "master", "commit": commit},
+        "project_id": "unit-test-project",
+        "source_commit": commit,
     }
     first = await manager.prepare(issue)
     marker = first.path / "agent-change.txt"

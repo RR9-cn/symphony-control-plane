@@ -23,14 +23,10 @@ def main() -> int:
     Draft202012Validator.check_schema(schema)
     sample = {
         "id": "ISSUE-001",
+        "project_id": "project-001",
         "title": "Validate protocol",
         "description": "One generic coding agent completes this Issue.",
         "priority": 1,
-        "repository": {
-            "url": "https://github.com/example/repository.git",
-            "base_branch": "main",
-            "commit": "0" * 40,
-        },
         "acceptance_criteria": ["Protocol validates"],
     }
     Draft202012Validator(schema).validate(sample)

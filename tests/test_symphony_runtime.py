@@ -158,18 +158,15 @@ async def test_startup_cleanup_removes_terminal_issue_workspaces(
     workflow_path.write_text(source, encoding="utf-8")
     workflow = load_workflow(workflow_path)
     tracker = FakeTracker(workflow.tracker, [{"id": "ISSUE-DONE", "status": "done"}])
-    skills = FakeSkills()
     workspaces = FakeWorkspaces()
     symphony = WindowsSymphony(
         workflow,
         tracker=tracker,  # type: ignore[arg-type]
-        skill_manager=skills,  # type: ignore[arg-type]
         workspace_manager=workspaces,  # type: ignore[arg-type]
     )
 
     await symphony._ensure_initialized()
 
-    assert skills.initialized == 1
     assert workspaces.removed == ["ISSUE-DONE"]
 
 
@@ -187,12 +184,10 @@ async def test_reconciliation_stops_terminal_run_and_cleans_workspace(
     workflow = load_workflow(workflow_path)
     issue = {"id": "ISSUE-CANCEL", "identifier": "ISSUE-CANCEL"}
     tracker = FakeTracker(workflow.tracker, [{**issue, "status": "cancelled"}])
-    skills = FakeSkills()
     workspaces = FakeWorkspaces()
     symphony = WindowsSymphony(
         workflow,
         tracker=tracker,  # type: ignore[arg-type]
-        skill_manager=skills,  # type: ignore[arg-type]
         workspace_manager=workspaces,  # type: ignore[arg-type]
     )
     lease = ClaimLease(issue={**issue, "status": "running"}, token="token", attempt={})
@@ -202,7 +197,6 @@ async def test_reconciliation_stops_terminal_run_and_cleans_workspace(
         workflow=workflow,
         tracker=tracker,  # type: ignore[arg-type]
         workspace_manager=workspaces,  # type: ignore[arg-type]
-        skill_manager=skills,  # type: ignore[arg-type]
         started_at=time.monotonic(),
         scheduling_state="ready",
     )
@@ -233,7 +227,6 @@ async def test_workflow_hot_reload_keeps_last_known_good_on_invalid_edit(
     symphony = WindowsSymphony(
         workflow,
         tracker=tracker,  # type: ignore[arg-type]
-        skill_manager=FakeSkills(),  # type: ignore[arg-type]
         workspace_manager=FakeWorkspaces(),  # type: ignore[arg-type]
     )
 

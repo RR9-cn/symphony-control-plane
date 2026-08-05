@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -12,7 +11,6 @@ from typing import Sequence
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from symphony_windows.skill import SkillError, SkillManager  # noqa: E402
 from symphony_windows.workflow import Workflow, WorkflowError, load_workflow  # noqa: E402
 
 
@@ -23,19 +21,15 @@ class WorkflowValidationError(RuntimeError):
 def validate_contract(workflow: Workflow) -> None:
     if workflow.agent.max_turns <= 1:
         raise WorkflowValidationError("agent.max_turns must allow multi-Turn execution")
-    if not workflow.agent.skills:
-        raise WorkflowValidationError("the coding agent must declare a Skill allowlist")
     sample = {
         "id": "ISSUE-001",
         "identifier": "ISSUE-001",
         "title": "Validate the generic agent",
         "description": "Analyze, implement, and test one complete Issue.",
         "acceptance_criteria": ["Prompt renders"],
-        "repository": {
-            "url": str(ROOT),
-            "base_branch": "main",
-            "commit": "0" * 40,
-        },
+        "project_id": "validation-project",
+        "source_commit": "0" * 40,
+        "workflow_revision": "0" * 64,
     }
     prompt = workflow.render_prompt(sample, 1)
     required = ["ISSUE-001", "analy", "implement", "test", "issue_complete"]
@@ -44,33 +38,35 @@ def validate_contract(workflow: Workflow) -> None:
         raise WorkflowValidationError(f"generic agent prompt is missing required context: {missing}")
 
 
-async def validate(path: Path, *, check_skills: bool = True) -> Workflow:
-    workflow = load_workflow(path)
+def validate(path: Path) -> Workflow:
+    workflow = load_workflow(
+        path,
+        token_override="validation-token",
+        worker_id_override="workflow-validator",
+        project_id_override="validation-project",
+    )
     validate_contract(workflow)
-    if check_skills:
-        await SkillManager(workflow.skill_repository, workflow.agent).initialize()
     return workflow
 
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="Validate WORKFLOW.md without claiming an Issue")
     result.add_argument("workflow", nargs="?", type=Path, default=ROOT / "WORKFLOW.md")
-    result.add_argument("--skip-skills", action="store_true")
     return result
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
-        workflow = asyncio.run(validate(args.workflow.resolve(), check_skills=not args.skip_skills))
-    except (OSError, SkillError, WorkflowError, WorkflowValidationError) as error:
+        workflow = validate(args.workflow.resolve())
+    except (OSError, WorkflowError, WorkflowValidationError) as error:
         print(f"Workflow validation failed: {error}", file=sys.stderr)
         return 1
     print("Symphony one-agent workflow validation passed")
     print(f"  file: {workflow.path}")
     print(f"  max turns: {workflow.agent.max_turns}")
     print(f"  max concurrent Issues: {workflow.agent.max_concurrent_agents}")
-    print(f"  skills: {len(workflow.agent.skills)}")
+    print("  skills: repository-local .codex/skills (runtime discovery)")
     print("  dispatch performed: no")
     return 0
 

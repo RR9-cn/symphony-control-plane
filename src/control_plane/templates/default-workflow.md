@@ -36,11 +36,11 @@ hooks:
     & git clone --no-checkout -- $repository .
     if ($LASTEXITCODE -ne 0) { throw "git clone failed with exit code $LASTEXITCODE" }
     & git cat-file -e "$commit^{commit}"
-    if ($LASTEXITCODE -ne 0) { throw "Issue repository.commit is unavailable" }
+    if ($LASTEXITCODE -ne 0) { throw "Source Commit is unavailable" }
     & git checkout --detach $commit
     if ($LASTEXITCODE -ne 0) { throw "git checkout failed with exit code $LASTEXITCODE" }
     $actual = (& git rev-parse HEAD).Trim().ToLowerInvariant()
-    if ($actual -ne $commit.ToLowerInvariant()) { throw "Workspace HEAD does not match Issue repository.commit" }
+    if ($actual -ne $commit.ToLowerInvariant()) { throw "Workspace HEAD does not match Source Commit" }
   before_run: |
     $ErrorActionPreference = "Stop"
     & git rev-parse --is-inside-work-tree *> $null
@@ -53,6 +53,7 @@ agent:
   max_turns: 30
   sandbox: danger-full-access
   network_access: true
+
 codex:
   command: codex app-server
   isolate_user_home: true

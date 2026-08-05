@@ -12,19 +12,55 @@ class ApiModel(BaseModel):
     model_config = ConfigDict(extra="forbid", from_attributes=True, populate_by_name=True)
 
 
-class RepositoryData(ApiModel):
-    url: str = Field(min_length=1)
-    base_branch: str = Field(min_length=1)
-    commit: str = Field(pattern=r"^[a-fA-F0-9]{40}$")
+class ProjectCreate(ApiModel):
+    key: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{1,99}$")
+    name: str = Field(min_length=1, max_length=200)
+    repository_path: str = Field(min_length=1, max_length=1000)
+    default_branch: str = Field(default="main", min_length=1, max_length=255)
+    workflow_path: str = Field(default="WORKFLOW.md", min_length=1, max_length=500)
+    enabled: bool = True
+    bootstrap_workflow: bool = True
 
 
-class RepositoryHeadRequest(ApiModel):
-    path: str = Field(min_length=1)
+class ProjectPatch(ApiModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    repository_path: str | None = Field(default=None, min_length=1, max_length=1000)
+    default_branch: str | None = Field(default=None, min_length=1, max_length=255)
+    workflow_path: str | None = Field(default=None, min_length=1, max_length=500)
+    enabled: bool | None = None
 
 
-class RepositoryHeadView(ApiModel):
-    path: str
-    commit: str = Field(pattern=r"^[a-f0-9]{40}$")
+class WorkflowSnapshotView(ApiModel):
+    id: str
+    project_id: str
+    source_commit: str
+    workflow_revision: str
+    parsed_config: dict[str, Any]
+    status: str
+    validation_error: str | None
+    created_at: datetime
+
+
+class ProjectView(ApiModel):
+    id: str
+    key: str
+    name: str
+    repository_path: str
+    default_branch: str
+    workflow_path: str
+    enabled: bool
+    status: str
+    validation_error: str | None
+    current_snapshot_id: str | None
+    current_snapshot: WorkflowSnapshotView | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectRef(ApiModel):
+    id: str
+    key: str
+    name: str
 
 
 class BlockerRef(ApiModel):
@@ -44,7 +80,7 @@ class IssueCreate(ApiModel):
     title: str = Field(min_length=1, max_length=200)
     description: str = Field(min_length=1)
     priority: int = Field(default=2, ge=0, le=4)
-    repository: RepositoryData
+    project_id: str = Field(min_length=1, max_length=36)
     acceptance_criteria: list[str] = Field(min_length=1)
     url: str | None = Field(default=None, max_length=2000)
     assignee_id: str | None = Field(default=None, max_length=255)
@@ -103,7 +139,12 @@ class IssueView(ApiModel):
     status: str
     priority: int
     version: int
-    repository: RepositoryData
+    project_id: str
+    project: ProjectRef
+    workflow_snapshot_id: str
+    workflow_revision: str
+    source_commit: str
+    workspace_path: str
     acceptance_criteria: list[str]
     url: str | None
     assignee_id: str | None
@@ -220,6 +261,7 @@ class AgentAttemptEventView(ApiModel):
 
 class WorkerRegistration(ApiModel):
     worker_id: str = Field(validation_alias=AliasChoices("worker_id", "workerId"), min_length=1)
+    project_id: str = Field(validation_alias=AliasChoices("project_id", "projectId"), min_length=1, max_length=36)
     hostname: str = Field(min_length=1)
     process_id: int = Field(validation_alias=AliasChoices("process_id", "processId"), ge=1)
     version: str = Field(min_length=1, max_length=50)
@@ -239,6 +281,7 @@ class WorkerHeartbeat(ApiModel):
 
 class WorkerView(ApiModel):
     id: str
+    project_id: str
     hostname: str
     process_id: int
     version: str
@@ -265,7 +308,9 @@ class AgentRuntimeView(ApiModel):
     updated_at: datetime
 
 
-class RunnerControlView(ApiModel):
+class ProjectRuntimeView(ApiModel):
+    project_id: str
+    project_key: str
     state: Literal["stopped", "starting", "running", "stopping"]
     process_id: int | None
     worker_id: str
@@ -275,8 +320,17 @@ class RunnerControlView(ApiModel):
     recent_logs: list[str]
 
 
+class RunnerControlView(ApiModel):
+    state: Literal["stopped", "starting", "running", "stopping"]
+    runtimes: list[ProjectRuntimeView]
+    registered_projects: int = 0
+    available_projects: int = 0
+    invalid_projects: int = 0
+
+
 class ClaimRequest(ApiModel):
     worker_id: str = Field(validation_alias=AliasChoices("worker_id", "workerId"), min_length=1)
+    project_id: str = Field(validation_alias=AliasChoices("project_id", "projectId"), min_length=1, max_length=36)
     expected_version: int = Field(validation_alias=AliasChoices("expected_version", "expectedVersion"), ge=1)
     lease_seconds: int = Field(default=300, validation_alias=AliasChoices("lease_seconds", "leaseSeconds"), ge=10, le=3600)
     agent: AgentConfigSnapshot
@@ -302,6 +356,7 @@ class ClaimResult(ApiModel):
     resume_thread_id: str | None = None
     resume_decisions: list[DecisionView] = Field(default_factory=list)
     continuation_turn_count: int = Field(default=0, ge=0)
+    workflow_content: str
 
 
 class HeartbeatRequest(ApiModel):

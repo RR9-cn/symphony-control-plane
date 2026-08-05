@@ -124,6 +124,11 @@ class WorkspaceManager:
                 ),
                 "SYMPHONY_ISSUE_JSON": json.dumps(issue, ensure_ascii=False),
                 "SYMPHONY_WORKSPACE": str(workspace),
+                "SYMPHONY_PROJECT_ID": str(issue.get("project_id") or os.getenv("SYMPHONY_PROJECT_ID", "")),
+                "SYMPHONY_PROJECT_REPOSITORY": os.getenv("SYMPHONY_PROJECT_REPOSITORY", ""),
+                "SYMPHONY_PROJECT_DEFAULT_BRANCH": os.getenv("SYMPHONY_PROJECT_DEFAULT_BRANCH", ""),
+                "SYMPHONY_SOURCE_COMMIT": str(issue.get("source_commit", "")),
+                "SYMPHONY_WORKFLOW_REVISION": str(issue.get("workflow_revision", "")),
             }
         )
         process = await asyncio.create_subprocess_exec(

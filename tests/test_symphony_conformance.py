@@ -178,7 +178,6 @@ async def test_tick_enforces_required_labels_and_per_state_concurrency(
     symphony = WindowsSymphony(
         workflow,
         tracker=Adapter(),  # type: ignore[arg-type]
-        skill_manager=Skills(),  # type: ignore[arg-type]
         workspace_manager=Workspaces(),  # type: ignore[arg-type]
     )
     never = asyncio.Event()

@@ -33,6 +33,7 @@ class ClaimLease:
     resume_thread_id: str | None = None
     resume_decisions: list[dict[str, Any]] = field(default_factory=list)
     continuation_turn_count: int = 0
+    workflow_content: str = ""
     active: bool = True
 
     @property
@@ -141,7 +142,7 @@ class ControlPlaneTracker:
         payload = await self._request(
             "GET",
             "/api/issues",
-            params=[("state", _state(state)) for state in state_names],
+            params=[("project_id", self.config.project_id), *( ("state", _state(state)) for state in state_names)],
         )
         if not isinstance(payload, list):
             raise TrackerError("issue state response must be a list")
@@ -163,7 +164,7 @@ class ControlPlaneTracker:
         if not issue_ids:
             return []
         payload = await self._request(
-            "GET", "/api/issues", params=[("id", issue_id) for issue_id in issue_ids]
+            "GET", "/api/issues", params=[("project_id", self.config.project_id), *(("id", issue_id) for issue_id in issue_ids)]
         )
         if not isinstance(payload, list):
             raise TrackerError("issue refresh response must be a list")
@@ -215,6 +216,7 @@ class ControlPlaneTracker:
                 "POST", self._issue_path(issue_id) + "/claim",
                 json={
                     "workerId": self.config.worker_id, "expectedVersion": version,
+                    "projectId": self.config.project_id,
                     "leaseSeconds": self.config.lease_seconds, "agent": {"config": agent_snapshot},
                 },
             )
@@ -232,6 +234,7 @@ class ControlPlaneTracker:
             resume_thread_id=payload.get("resume_thread_id"),
             resume_decisions=payload.get("resume_decisions", []),
             continuation_turn_count=payload.get("continuation_turn_count", 0),
+            workflow_content=str(payload.get("workflow_content") or ""),
         )
 
     async def heartbeat(self, lease: ClaimLease) -> dict[str, Any]:
@@ -267,6 +270,7 @@ class ControlPlaneTracker:
             "POST", "/api/workers/register",
             json={
                 "workerId": self.config.worker_id, "hostname": socket.gethostname(),
+                "projectId": self.config.project_id,
                 "processId": os.getpid(), "version": "0.2.0", "capacity": capacity,
             },
         )
@@ -442,6 +446,8 @@ def _normalize_issue(
     payload: dict[str, Any], config: TrackerConfig
 ) -> dict[str, Any]:
     issue = dict(payload)
+    if str(payload.get("project_id") or "") != config.project_id:
+        raise TrackerError("tracker received an Issue from a different project")
     issue["id"] = str(payload.get("id") or "")
     issue["identifier"] = str(payload.get("identifier") or issue["id"])
     issue["state"] = _state(payload.get("state") or payload.get("status"))

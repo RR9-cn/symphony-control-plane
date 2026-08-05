@@ -13,6 +13,7 @@ def _tracker(api) -> ControlPlaneTracker:
             endpoint="http://test",
             token="unused",
             worker_id="windows-symphony-test",
+            project_id=api.project_id,
             lease_seconds=300,
         ),
         transport=httpx.ASGITransport(app=api.app),

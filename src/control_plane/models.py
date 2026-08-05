@@ -37,6 +37,45 @@ class Base(DeclarativeBase):
     pass
 
 
+class Project(Base):
+    __tablename__ = "projects"
+    __table_args__ = (
+        UniqueConstraint("key", name="uq_projects_key"),
+        UniqueConstraint("repository_path", name="uq_projects_repository_path"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    key: Mapped[str] = mapped_column(String(100))
+    name: Mapped[str] = mapped_column(String(200))
+    repository_path: Mapped[str] = mapped_column(String(1000))
+    default_branch: Mapped[str] = mapped_column(String(255), default="main")
+    workflow_path: Mapped[str] = mapped_column(String(500), default="WORKFLOW.md")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(32), default="invalid")
+    validation_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    current_snapshot_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class ProjectWorkflowSnapshot(Base):
+    __tablename__ = "project_workflow_snapshots"
+    __table_args__ = (
+        UniqueConstraint("project_id", "source_commit", "workflow_revision", "status", name="uq_project_commit_workflow_status"),
+        Index("ix_project_snapshots_created", "project_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    source_commit: Mapped[str] = mapped_column(String(40))
+    workflow_revision: Mapped[str] = mapped_column(String(64))
+    workflow_content: Mapped[str] = mapped_column(Text)
+    parsed_config: Mapped[dict[str, Any]] = mapped_column(JSON_VALUE)
+    status: Mapped[str] = mapped_column(String(32), default="valid")
+    validation_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class Issue(Base):
     __tablename__ = "issues"
     __table_args__ = (
@@ -53,19 +92,22 @@ class Issue(Base):
             "AND claim_token_hash IS NULL AND claim_expires_at IS NULL)",
             name="ck_issues_claim_state",
         ),
-        Index("ix_issues_candidate_order", "status", "priority", "created_at"),
+        Index("ix_issues_candidate_order", "project_id", "status", "priority", "created_at"),
         Index("ix_issues_expired_claims", "status", "claim_expires_at"),
         UniqueConstraint("identifier", name="uq_issues_identifier"),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"), index=True)
+    workflow_snapshot_id: Mapped[str] = mapped_column(ForeignKey("project_workflow_snapshots.id", ondelete="RESTRICT"))
+    source_commit: Mapped[str] = mapped_column(String(40))
+    workspace_path: Mapped[str] = mapped_column(String(1000))
     identifier: Mapped[str] = mapped_column(String(128))
     title: Mapped[str] = mapped_column(String(200))
     description: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(32), default="ready")
     priority: Mapped[int] = mapped_column(Integer, default=2)
     version: Mapped[int] = mapped_column(Integer, default=1)
-    repository: Mapped[dict[str, Any]] = mapped_column(JSON_VALUE)
     acceptance_criteria: Mapped[list[str]] = mapped_column(JSON_VALUE)
     url: Mapped[str | None] = mapped_column(String(2000), nullable=True)
     assignee_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -119,6 +161,7 @@ class Worker(Base):
     __table_args__ = (Index("ix_workers_last_seen", "last_seen_at"),)
 
     id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     hostname: Mapped[str] = mapped_column(String(255))
     process_id: Mapped[int] = mapped_column(Integer)
     version: Mapped[str] = mapped_column(String(50))

@@ -20,6 +20,8 @@ from control_plane.models import (
     Issue,
     IssueArtifact,
     IssueEvent,
+    Project,
+    ProjectWorkflowSnapshot,
     Worker,
     utc_now,
 )
@@ -45,11 +47,13 @@ from control_plane.schemas import (
     IssueView,
     MaintenanceResult,
     ReleaseRequest,
+    ProjectRef,
     StatusTransitionRequest,
     WorkerHeartbeat,
     WorkerRegistration,
     WorkerView,
 )
+from symphony_windows.workspace import workspace_key
 
 
 ACTIVE_STATUSES = {"ready", "running", "retry_queued", "needs_human", "blocked", "reviewing", "awaiting_publish", "pr_open"}
@@ -95,12 +99,12 @@ class ControlPlaneService:
         root = Path(self.settings.issue_workspace_root)
         if not root.is_absolute():
             root = Path(self.settings.managed_runner_workflow).resolve().parent / root
-        gitlab_token = (
+        self.gitlab_token = (
             self.settings.gitlab_token.get_secret_value()
             if self.settings.gitlab_token is not None
             else None
         )
-        self.delivery = IssueDeliveryManager(root, gitlab_token=gitlab_token)
+        self.delivery = IssueDeliveryManager(root, gitlab_token=self.gitlab_token)
 
     async def create_issue(self, command: IssueCreate) -> IssueView:
         async with self.session.begin():
@@ -113,27 +117,41 @@ class ControlPlaneService:
                 raise ConflictError(
                     f"issue identifier already exists: {command.identifier}"
                 )
+            project = await self.session.get(Project, command.project_id)
+            if project is None:
+                raise NotFoundError(f"project not found: {command.project_id}")
+            if not project.enabled or project.status != "available" or not project.current_snapshot_id:
+                raise ConflictError("project must be enabled with a valid WORKFLOW.md before creating Issues")
+            snapshot = await self.session.get(ProjectWorkflowSnapshot, project.current_snapshot_id)
+            if snapshot is None or snapshot.status != "valid":
+                raise ConflictError("project workflow snapshot is unavailable")
+            workspace_root = Path(str(snapshot.parsed_config["workspace"]["root"]))
             issue = Issue(
                 **command.model_dump(), status="ready", version=1,
+                workflow_snapshot_id=snapshot.id,
+                source_commit=snapshot.source_commit,
+                workspace_path=str((workspace_root / workspace_key(str(command.identifier))).resolve()),
             )
             self.session.add(issue)
             await self.session.flush()
             self._add_event(issue.id, "created", "user", "manual-intake", None, "ready", {})
         return await self.get_issue(command.id)
 
-    async def list_issues(self, statuses: list[str] | None = None, issue_ids: list[str] | None = None) -> list[IssueView]:
+    async def list_issues(self, statuses: list[str] | None = None, issue_ids: list[str] | None = None, project_id: str | None = None) -> list[IssueView]:
         statement = select(Issue)
         if statuses:
             statement = statement.where(Issue.status.in_(statuses))
         if issue_ids:
             statement = statement.where(Issue.id.in_(issue_ids))
+        if project_id:
+            statement = statement.where(Issue.project_id == project_id)
         rows = (await self.session.scalars(statement.order_by(Issue.priority, Issue.created_at))).all()
         return [await self._issue_view(row) for row in rows]
 
-    async def candidates(self, limit: int = 100) -> list[IssueView]:
+    async def candidates(self, project_id: str, limit: int = 100) -> list[IssueView]:
         rows = (
             await self.session.scalars(
-                select(Issue).where(Issue.status == "ready").order_by(Issue.priority, Issue.created_at).limit(limit)
+                select(Issue).where(Issue.project_id == project_id, Issue.status == "ready").order_by(Issue.priority, Issue.created_at).limit(limit)
             )
         ).all()
         return [await self._issue_view(row) for row in rows]
@@ -196,9 +214,21 @@ class ControlPlaneService:
         now = utc_now()
         expires = now + timedelta(seconds=command.lease_seconds)
         async with self.session.begin():
+            candidate = await self._require_issue(issue_id)
+            project = await self.session.get(Project, candidate.project_id)
+            snapshot = await self.session.get(ProjectWorkflowSnapshot, candidate.workflow_snapshot_id)
+            if project is None or not project.enabled or project.status != "available":
+                raise ClaimError("issue project is not available for new Claims")
+            if snapshot is None or snapshot.status != "valid":
+                raise ClaimError("issue workflow snapshot is unavailable")
             result = await self.session.execute(
                 update(Issue)
-                .where(Issue.id == issue_id, Issue.status == "ready", Issue.version == command.expected_version)
+                .where(
+                    Issue.id == issue_id,
+                    Issue.project_id == command.project_id,
+                    Issue.status == "ready",
+                    Issue.version == command.expected_version,
+                )
                 .values(
                     status="running", version=Issue.version + 1, claim_worker_id=command.worker_id,
                     claim_token_hash=_token_hash(token), claim_expires_at=expires, retry_at=None,
@@ -210,7 +240,18 @@ class ControlPlaneService:
             number = int(await self.session.scalar(select(func.count()).select_from(AgentAttempt).where(AgentAttempt.issue_id == issue_id)) or 0) + 1
             attempt = AgentAttempt(
                 issue_id=issue_id, attempt_number=number, worker_id=command.worker_id,
-                config_snapshot=command.agent.config, status="running",
+                config_snapshot={
+                    **command.agent.config,
+                    "project_id": project.id,
+                    "project_key": project.key,
+                    "repository_path_hash": hashlib.sha256(project.repository_path.encode("utf-8")).hexdigest(),
+                    "source_commit": candidate.source_commit,
+                    "workflow_snapshot_id": snapshot.id,
+                    "workflow_revision": snapshot.workflow_revision,
+                    "workspace_path": candidate.workspace_path,
+                    "project_assets": snapshot.parsed_config.get("project_assets", {}),
+                },
+                status="running",
             )
             self.session.add(attempt)
             self._add_event(issue_id, "claimed", "worker", command.worker_id, "ready", "running", {"attempt": number})
@@ -229,6 +270,7 @@ class ControlPlaneService:
             resume_thread_id=latest_previous.thread_id if latest_previous else None,
             resume_decisions=[DecisionView.model_validate(row) for row in decisions],
             continuation_turn_count=latest_previous.turn_count if latest_previous else 0,
+            workflow_content=snapshot.workflow_content,
         )
 
     async def heartbeat(self, issue_id: str, command: HeartbeatRequest) -> IssueView:
@@ -285,7 +327,13 @@ class ControlPlaneService:
         issue = await self._require_issue(issue_id)
         if issue.version != command.expected_version:
             raise ConflictError("issue version changed")
-        repository = dict(issue.repository)
+        project = await self.session.get(Project, issue.project_id)
+        if project is None:
+            raise ConflictError("issue project is unavailable")
+        repository_url = project.repository_path
+        base_branch = project.default_branch
+        delivery_identifier = issue.identifier
+        delivery = IssueDeliveryManager(Path(issue.workspace_path).parent, gitlab_token=self.gitlab_token)
         status = issue.status
         title = issue.title
         head_branch = issue.head_branch
@@ -299,7 +347,7 @@ class ControlPlaneService:
             if status != "reviewing":
                 raise ConflictError(f"issue cannot approve result while status={status}")
             try:
-                branch, commit = await self.delivery.prepare_local_commit(issue_id, title)
+                branch, commit = await delivery.prepare_local_commit(delivery_identifier, title)
             except DeliveryError as error:
                 raise ConflictError(str(error)) from error
             async with self.session.begin():
@@ -316,8 +364,8 @@ class ControlPlaneService:
             if status != "awaiting_publish" or not head_branch or not local_commit:
                 raise ConflictError(f"issue cannot publish while status={status}")
             try:
-                review_request = await self.delivery.publish(
-                    issue_id, repository_url=str(repository["url"]), base_branch=str(repository["base_branch"]),
+                review_request = await delivery.publish(
+                    delivery_identifier, repository_url=repository_url, base_branch=base_branch,
                     branch=head_branch, commit=local_commit, title=title,
                     body=f"Generated by Fshows Symphony for {issue_id} after the coding agent completed the issue.",
                 )
@@ -336,7 +384,7 @@ class ControlPlaneService:
             if status != "pr_open" or not pull_request_url:
                 raise ConflictError(f"issue cannot confirm merge while status={status}")
             try:
-                await self.delivery.verify_merged(str(repository["url"]), pull_request_url)
+                await delivery.verify_merged(repository_url, pull_request_url)
             except DeliveryError as error:
                 raise ConflictError(str(error)) from error
             async with self.session.begin():
@@ -461,6 +509,8 @@ class ControlPlaneService:
 
     async def register_worker(self, command: WorkerRegistration) -> WorkerView:
         async with self.session.begin():
+            if await self.session.get(Project, command.project_id) is None:
+                raise NotFoundError(f"project not found: {command.project_id}")
             worker = await self.session.get(Worker, command.worker_id)
             values = command.model_dump()
             values["id"] = values.pop("worker_id")
@@ -486,8 +536,11 @@ class ControlPlaneService:
             worker.last_seen_at = utc_now()
         return WorkerView.model_validate(worker)
 
-    async def list_workers(self) -> list[WorkerView]:
-        rows = (await self.session.scalars(select(Worker).order_by(Worker.started_at.desc()))).all()
+    async def list_workers(self, project_id: str | None = None) -> list[WorkerView]:
+        statement = select(Worker)
+        if project_id:
+            statement = statement.where(Worker.project_id == project_id)
+        rows = (await self.session.scalars(statement.order_by(Worker.started_at.desc()))).all()
         return [WorkerView.model_validate(row) for row in rows]
 
     async def request_worker_stop(self, worker_id: str) -> WorkerView:
@@ -555,10 +608,20 @@ class ControlPlaneService:
 
     async def _issue_view(self, issue: Issue) -> IssueView:
         artifacts = (await self.session.scalars(select(IssueArtifact).where(IssueArtifact.issue_id == issue.id).order_by(IssueArtifact.created_at))).all()
+        snapshot = await self.session.get(ProjectWorkflowSnapshot, issue.workflow_snapshot_id)
+        project = await self.session.get(Project, issue.project_id)
+        if snapshot is None:
+            raise ConflictError("issue workflow snapshot is unavailable")
+        if project is None:
+            raise ConflictError("issue project is unavailable")
         return IssueView(
             id=issue.id, identifier=issue.identifier, title=issue.title,
             description=issue.description, state=issue.status, status=issue.status,
-            priority=issue.priority, version=issue.version, repository=issue.repository,
+            priority=issue.priority, version=issue.version,
+            project_id=issue.project_id, workflow_snapshot_id=issue.workflow_snapshot_id,
+            project=ProjectRef(id=project.id, key=project.key, name=project.name),
+            workflow_revision=snapshot.workflow_revision,
+            source_commit=issue.source_commit, workspace_path=issue.workspace_path,
             acceptance_criteria=issue.acceptance_criteria, url=issue.url,
             assignee_id=issue.assignee_id, labels=issue.labels,
             blocked_by=issue.blocked_by, native_ref=issue.native_ref,

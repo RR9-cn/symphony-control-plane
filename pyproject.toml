@@ -34,7 +34,7 @@ dev = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-control_plane = ["ui/*.html", "ui/*.css", "ui/*.js"]
+control_plane = ["ui/*.html", "ui/*.css", "ui/*.js", "templates/*.md"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

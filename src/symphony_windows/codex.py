@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import inspect
 import json
 import logging
@@ -68,7 +69,18 @@ class CodexAppServer:
         turn_id = ""
         try:
             await self._initialize()
-            await self._validate_skills(workspace)
+            skills = await self._validate_skills(workspace)
+            if add_attempt_event := getattr(tracker, "add_attempt_event", None):
+                await add_attempt_event(
+                    lease,
+                    {
+                        "event_type": "skills_discovered",
+                        "item_type": "project_skills",
+                        "status": "completed",
+                        "summary": f"Discovered {len(skills)} repository Skills",
+                        "payload": {"skills": skills},
+                    },
+                )
             thread_id = await self._open_thread(
                 workspace,
                 tracker,
@@ -160,7 +172,7 @@ class CodexAppServer:
             raise CodexError(f"cannot launch Codex app-server: {error}") from error
         self._stderr_task = asyncio.create_task(self._drain_stderr())
 
-    async def _validate_skills(self, workspace: Path) -> None:
+    async def _validate_skills(self, workspace: Path) -> list[dict[str, str]]:
         result = await self._request(
             "skills/list",
             {
@@ -179,37 +191,35 @@ class CodexAppServer:
             if isinstance(skills, list):
                 entries.extend(skill for skill in skills if isinstance(skill, dict))
 
-        allowed = set(self.config.allowed_skills)
-        expected_root = (workspace / ".agents" / "skills").resolve()
+        expected_root = (workspace / ".codex" / "skills").resolve()
+        declared: dict[str, Path] = {}
+        if expected_root.is_dir():
+            for skill_file in expected_root.glob("*/SKILL.md"):
+                resolved = skill_file.resolve(strict=True)
+                if not resolved.is_relative_to(expected_root):
+                    raise CodexError(f"repository Skill escapes .codex/skills: {skill_file}")
+                declared[skill_file.parent.name] = resolved
         found: set[str] = set()
-        unexpected_fshows: set[str] = set()
+        unexpected_local: set[str] = set()
         for entry in entries:
             name = entry.get("name")
             raw_path = entry.get("path")
-            if not isinstance(name, str):
-                continue
-            if name.startswith("fskill-") and name not in allowed:
-                unexpected_fshows.add(name)
-            if name not in allowed or not isinstance(raw_path, str):
+            if not isinstance(name, str) or not isinstance(raw_path, str):
                 continue
             path = Path(raw_path).resolve()
-            expected = (expected_root / name / "SKILL.md").resolve()
-            if path == expected:
+            if name in declared and path == declared[name]:
                 found.add(name)
-        missing = allowed - found
-        if missing or unexpected_fshows:
-            details: list[str] = []
-            if missing:
-                details.append(
-                    f"missing workspace skills: {', '.join(sorted(missing))}"
-                )
-            if unexpected_fshows:
-                details.append(
-                    f"unexpected Fshows skills: {', '.join(sorted(unexpected_fshows))}"
-                )
-            raise CodexError(
-                "Codex Skill allowlist validation failed: " + "; ".join(details)
-            )
+            elif path.is_relative_to(workspace.resolve()):
+                unexpected_local.add(f"{name} ({path})")
+        missing = set(declared) - found
+        if missing:
+            raise CodexError("Codex did not discover repository Skills: " + ", ".join(sorted(missing)))
+        if unexpected_local:
+            raise CodexError("Codex discovered workspace Skills outside .codex/skills: " + ", ".join(sorted(unexpected_local)))
+        return [
+            {"name": name, "path": str(declared[name]), "sha256": _skill_hash(declared[name].parent)}
+            for name in sorted(found)
+        ]
 
     async def _initialize(self) -> None:
         await self._request(
@@ -551,6 +561,19 @@ def _tool_call(params: Any) -> tuple[str | None, dict[str, Any]]:
         name if isinstance(name, str) else None,
         arguments if isinstance(arguments, dict) else {},
     )
+
+
+def _skill_hash(skill_root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(item for item in skill_root.rglob("*") if item.is_file()):
+        resolved = path.resolve(strict=True)
+        if not resolved.is_relative_to(skill_root.resolve()):
+            raise CodexError(f"repository Skill file escapes its directory: {path}")
+        digest.update(path.relative_to(skill_root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _looks_like_input_request(method: str) -> bool:

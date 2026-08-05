@@ -18,11 +18,11 @@ async def test_dashboard_and_issue_crud(api):
     assert dashboard.status_code == 200
     assert 'id="issue-cancel-button" type="submit" value="cancel" formnovalidate' in dashboard.text
     assert 'id="issue-close-button" type="submit" value="cancel" formnovalidate' in dashboard.text
-    assert '/ui/assets/app.js?v=20260805-4' in dashboard.text
+    assert '/ui/assets/app.js?v=20260805-v2' in dashboard.text
     created = await api.post("/api/issues", json=issue_payload())
     assert created.status_code == 201
     assert created.json()["status"] == "ready"
-    assert [row["id"] for row in (await api.get("/api/issues/candidates")).json()] == ["ISSUE-001"]
+    assert [row["id"] for row in (await api.get("/api/issues/candidates", params={"project_id": api.project_id})).json()] == ["ISSUE-001"]
 
     patched = await api.patch(
         "/api/issues/ISSUE-001",
@@ -232,7 +232,7 @@ async def test_artifacts_events_workers_and_runtime(api):
 
     registered = await api.post(
         "/api/workers/register",
-        json={"workerId": "windows-symphony-managed", "hostname": "host", "processId": 100, "version": "0.2", "capacity": 4},
+        json={"workerId": "windows-symphony-managed", "projectId": api.project_id, "hostname": "host", "processId": 100, "version": "0.2", "capacity": 4},
     )
     assert registered.status_code == 200
     heartbeat = await api.post(
@@ -277,7 +277,7 @@ async def test_delivery_gates_use_compare_and_set_transactions(api, monkeypatch)
         return "https://github.com/example/catalog/pull/1"
 
     async def verify(_self, repository_url, pull_request):
-        assert repository_url == "https://github.com/example/catalog.git"
+        assert repository_url.endswith("project")
         assert pull_request.endswith("/pull/1")
 
     monkeypatch.setattr(IssueDeliveryManager, "prepare_local_commit", prepare)
