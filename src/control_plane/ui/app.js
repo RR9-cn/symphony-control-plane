@@ -12,7 +12,7 @@ const dom = {
 
 const STATUS = {
   ready: "Ready", running: "Running", retry_queued: "Retry queued", needs_human: "Needs human", blocked: "Blocked",
-  reviewing: "Final review", awaiting_publish: "Awaiting publish", pr_open: "PR open", done: "Done", cancelled: "Cancelled",
+  reviewing: "Final review", awaiting_publish: "Awaiting publish", pr_open: "PR / MR open", done: "Done", cancelled: "Cancelled",
 };
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
 const short = (value, size = 12) => value ? `${String(value).slice(0, size)}${String(value).length > size ? "…" : ""}` : "—";
@@ -123,6 +123,7 @@ async function openDetail(issueId, show = true) {
       <div class="detail-field"><span>Dispatchable</span><strong>${issue.dispatchable ? "Yes" : "No"}</strong></div><div class="detail-field"><span>Labels</span><strong>${escapeHtml(issue.labels.join(", ") || "—")}</strong></div>
     </div>
     <section class="section"><h3>验收标准</h3><ul>${issue.acceptance_criteria.map((value) => `<li>${escapeHtml(value)}</li>`).join("")}</ul></section>
+    ${issue.pull_request ? `<section class="section"><h3>PR / Merge Request</h3><p><a href="${escapeHtml(issue.pull_request)}" target="_blank" rel="noreferrer">${escapeHtml(issue.pull_request)}</a></p></section>` : ""}
     ${issue.blocker ? `<section class="section"><h3>Blocker</h3><pre>${escapeHtml(JSON.stringify(issue.blocker, null, 2))}</pre></section>` : ""}
     ${issue.blocked_by.length ? `<section class="section"><h3>Blocked By</h3><pre>${escapeHtml(JSON.stringify(issue.blocked_by, null, 2))}</pre></section>` : ""}
     ${renderDecisions(decisions)}
@@ -143,8 +144,8 @@ function renderDecisions(decisions) {
 function renderActions(issue) {
   const buttons = [];
   if (issue.status === "reviewing") buttons.push(["approve_result", "验收结果并生成 Commit"]);
-  if (issue.status === "awaiting_publish") buttons.push(["authorize_publish", "授权 Push / 创建 PR"]);
-  if (issue.status === "pr_open") buttons.push(["confirm_merge", "核验 PR 已合并"]);
+  if (issue.status === "awaiting_publish") buttons.push(["authorize_publish", "授权 Push / 创建 PR 或 MR"]);
+  if (issue.status === "pr_open") buttons.push(["confirm_merge", "核验 PR / MR 已合并"]);
   if (issue.status === "blocked") buttons.push(["retry_requested", "解除阻塞并重试"]);
   if (["ready", "running", "retry_queued", "needs_human", "blocked", "reviewing"].includes(issue.status)) buttons.push(["cancelled", issue.status === "running" ? "停止并取消 Issue" : "取消 Issue"]);
   dom.detailActions.innerHTML = buttons.map(([action, label]) => `<button class="button ${action === "cancelled" ? "ghost" : ""}" data-action="${action}" data-version="${issue.version}">${label}</button>`).join("");

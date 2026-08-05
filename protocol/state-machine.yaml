@@ -27,8 +27,8 @@ transitions:
   - {from: running, to: cancelled, event: cancelled, actor: human}
   - {from: reviewing, to: ready, event: result_rejected, actor: human}
   - {from: reviewing, to: awaiting_publish, event: result_approved, actor: human}
-  - {from: awaiting_publish, to: pr_open, event: pull_request_created, actor: human}
-  - {from: pr_open, to: done, event: pull_request_merged, actor: human}
+  - {from: awaiting_publish, to: pr_open, event: review_request_created, actor: human}
+  - {from: pr_open, to: done, event: review_request_merged, actor: human}
   - {from: ready, to: cancelled, event: cancelled, actor: human}
   - {from: retry_queued, to: cancelled, event: cancelled, actor: human}
   - {from: needs_human, to: cancelled, event: cancelled, actor: human}

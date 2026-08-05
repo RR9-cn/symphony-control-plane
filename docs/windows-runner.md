@@ -41,6 +41,6 @@ Agent 可调用六个绑定当前 Claim 的工具：
 
 Workspace 是 Issue 级持久目录。`after_create` 只在目录首次创建时执行，Clone 失败会删除未运行过 Agent 的半成品目录。所有后续 Attempt 都复用该目录。
 
-正式配置默认 `danger-full-access`，但 Prompt 仍禁止 Push、PR、Merge、发布、生产凭据和破坏性清理；这些操作由控制面人工交付门禁执行。运行结束后恢复临时 `.agents`/`.symphony` 资产，避免把 Skill 注入内容提交到业务仓库。
+正式配置默认 `danger-full-access`，但 Prompt 仍禁止 Push、PR/MR、Merge、发布、生产凭据和破坏性清理；这些操作由控制面人工交付门禁执行。运行结束后恢复临时 `.agents`/`.symphony` 资产，避免把 Skill 注入内容提交到业务仓库。
 
 Runner 会记录 Attempt、Thread、Turn Count 和归一化执行事件，不保存模型隐藏推理文本。

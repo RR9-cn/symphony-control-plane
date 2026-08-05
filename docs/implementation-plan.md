@@ -31,8 +31,8 @@ UI 手工创建 Issue
 → Agent 提交完整结果
 → 人工最终验收
 → 控制面生成本地 Commit
-→ 人工授权 Push / 创建 PR
-→ 确认 PR 合并
+→ 人工授权 Push / 创建 GitHub PR 或 GitLab MR
+→ 确认 PR/MR 合并
 → Issue Done
 ```
 
@@ -64,7 +64,7 @@ Turn 是 Attempt 内部事件，不驱动宏观状态来回切换。
 - [x] 单 Agent `WORKFLOW.md` 与 Windows Runner；
 - [x] 同一 Attempt 多 Turn、跨 Attempt Thread 恢复；
 - [x] Issue 级持久 Workspace 与临时 Skill 资产恢复；
-- [x] 一次最终 Review、本地 Commit、Push/PR/Merge 人工门禁；
+- [x] 一次最终 Review、本地 Commit、Push、GitHub PR/GitLab MR 和 Merge 人工门禁；
 - [x] Issue/Agent/Attempt 中心 UI；
 - [x] 删除 Feature/WorkItem/Profile/Handoff/Elixir 兼容层；
 - [x] Active Run Reconciliation：刷新运行中 Issue、终止失效/终态 Run、检测 Codex 事件停滞；
@@ -91,6 +91,6 @@ Turn 是 Attempt 内部事件，不驱动宏观状态来回切换。
 - 人工问答后恢复同一 Thread 和 Workspace；
 - 分析、代码、测试均出现在同一个业务变更集中；
 - Agent 完成后只进入一次 `reviewing`；
-- 未授权时不会 Push 或创建 PR；
-- PR 未合并时不能标记 `done`；
+- 未授权时不会 Push 或创建 PR/MR；
+- PR/MR 未合并时不能标记 `done`；
 - 数据库和 API 中不存在 Feature、WorkItem、Agent Profile 或 Handoff 表/端点。

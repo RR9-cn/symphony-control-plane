@@ -57,4 +57,6 @@ awaiting_publish → pr_open
 pr_open → done
 ```
 
-`reviewing` 是整个 Issue 的一次最终人工验收，不是阶段审批。通过后在 Issue Workspace 生成本地 Commit；Push/PR 和合并确认都要求显式授权。Agent 不能调用这些交付 API。
+`reviewing` 是整个 Issue 的一次最终人工验收，不是阶段审批。通过后在业务 Git 仓库生成本地 Commit；Push、GitHub PR/GitLab MR 和合并确认都要求显式授权。交付层只接受 Workspace 根目录或其直接 `repo/` 子目录中的真实 Git 根，禁止 Git 向父目录穿透。Agent 不能调用这些交付 API。
+
+GitLab 未配置 `ACP_GITLAB_TOKEN` 时使用 Git Push Options 原子 Push 并创建 MR；配置具备 `api` Scope 的 Token 后，交付层通过 GitLab API 幂等查找/创建 MR，并可核验合并状态。仅有 Git 写权限但没有 API Scope 的凭据不能用于 GitLab API。

@@ -18,7 +18,7 @@ async def test_dashboard_and_issue_crud(api):
     assert dashboard.status_code == 200
     assert 'id="issue-cancel-button" type="submit" value="cancel" formnovalidate' in dashboard.text
     assert 'id="issue-close-button" type="submit" value="cancel" formnovalidate' in dashboard.text
-    assert '/ui/assets/app.js?v=20260805-3' in dashboard.text
+    assert '/ui/assets/app.js?v=20260805-4' in dashboard.text
     created = await api.post("/api/issues", json=issue_payload())
     assert created.status_code == 201
     assert created.json()["status"] == "ready"

@@ -25,3 +25,4 @@ class Settings(BaseSettings):
     issue_workspace_root: str = ".workspaces"
     managed_runner_autostart: bool = False
     managed_runner_worker_id: str = "windows-symphony-managed"
+    gitlab_token: SecretStr | None = None

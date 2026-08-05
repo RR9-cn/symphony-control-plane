@@ -11,7 +11,7 @@ Issue 对调度器暴露稳定的标准字段：不透明 `id`、人类可读且
 - `issue_block`：进入 `blocked`；
 - Runner 异常或达到单进程 Turn 上限：进入短暂 `retry_queued`，复用 Workspace 与 Thread 继续。
 
-人工验收后依次执行本地 Commit、授权 Push/PR、确认 PR 已合并。只有 PR 合并后 Issue 才进入 `done`。Agent 没有 Push、创建 PR 或合并权限。
+人工验收后依次执行本地 Commit、授权 Push 并创建 GitHub PR/GitLab MR、确认 Review Request 已合并。只有合并后 Issue 才进入 `done`。Agent 没有 Push、创建 PR/MR 或合并权限。
 
 协议文件：
 
