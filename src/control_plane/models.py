@@ -167,6 +167,10 @@ class Worker(Base):
     version: Mapped[str] = mapped_column(String(50))
     capacity: Mapped[int] = mapped_column(Integer)
     active_issues: Mapped[list[str]] = mapped_column(JSON_VALUE, default=list)
+    runtime_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON_VALUE, default=dict)
+    runtime_snapshot_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     state: Mapped[str] = mapped_column(String(32), default="starting")
     stop_requested: Mapped[bool] = mapped_column(default=False)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
@@ -193,9 +197,9 @@ class AgentAttempt(Base):
 
     @property
     def session_id(self) -> str | None:
-        if self.thread_id and self.turn_id:
-            return f"{self.thread_id}-{self.turn_id}"
-        return None
+        # Codex resumes a conversation by thread ID; turn IDs identify messages
+        # within that stable session and must not become part of its identity.
+        return self.thread_id
 
     @property
     def duration_seconds(self) -> float:

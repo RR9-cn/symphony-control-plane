@@ -68,6 +68,14 @@ class CodexAppServer:
         thread_id = ""
         turn_id = ""
         try:
+            await self._emit(
+                {
+                    "method": "symphony/process_started",
+                    "params": {
+                        "process_id": self._process.pid if self._process else None
+                    },
+                }
+            )
             await self._initialize()
             skills = await self._validate_skills(workspace)
             if add_attempt_event := getattr(tracker, "add_attempt_event", None):
@@ -86,6 +94,12 @@ class CodexAppServer:
                 tracker,
                 resume_thread_id=resume_thread_id,
             )
+            await self._emit(
+                {
+                    "method": "symphony/session_started",
+                    "params": {"thread_id": thread_id},
+                }
+            )
             await tracker.update_attempt_context(lease, thread_id=thread_id)
             turn_count = 0
             status = "turn_completed"
@@ -99,6 +113,16 @@ class CodexAppServer:
                     workspace, turn_prompt, issue, thread_id
                 )
                 turn_count += 1
+                await self._emit(
+                    {
+                        "method": "symphony/turn_started",
+                        "params": {
+                            "thread_id": thread_id,
+                            "turn_id": turn_id,
+                            "turn_count": turn_count,
+                        },
+                    }
+                )
                 await tracker.update_attempt_context(
                     lease, thread_id=thread_id, turn_id=turn_id, turn_count=turn_count
                 )

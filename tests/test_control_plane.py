@@ -169,7 +169,7 @@ async def test_single_attempt_supports_multiple_turns_and_completion(api):
     assert attempts[0]["status"] == "reviewing"
     assert attempts[0]["thread_id"] == "thread-1"
     assert attempts[0]["turn_count"] == 3
-    assert attempts[0]["session_id"] == "thread-1-turn-3"
+    assert attempts[0]["session_id"] == "thread-1"
     assert attempts[0]["status_reason"] is None
     assert attempts[0]["duration_seconds"] >= 0
 
@@ -188,7 +188,7 @@ async def test_release_retries_and_resumes_same_thread(api):
     assert released.json()["status"] == "retry_queued"
     attempts = (await api.get("/api/issues/ISSUE-001/attempts")).json()
     assert attempts[0]["status_reason"] == "continuation_after_max_turns"
-    assert attempts[0]["session_id"] is None
+    assert attempts[0]["session_id"] == "thread-keep"
     assert attempts[0]["duration_seconds"] >= 0
     assert (await api.post("/api/maintenance/tick")).json()["readied"] == 1
     current = (await api.get("/api/issues/ISSUE-001")).json()
@@ -244,12 +244,61 @@ async def test_artifacts_events_workers_and_runtime(api):
     assert registered.status_code == 200
     heartbeat = await api.post(
         "/api/workers/windows-symphony-managed/heartbeat",
-        json={"state": "running", "activeIssues": ["ISSUE-001"]},
+        json={
+            "state": "running",
+            "activeIssues": ["ISSUE-001"],
+            "runtimeSnapshot": {
+                "generated_at": "2026-08-05T12:00:00Z",
+                "project_id": api.project_id,
+                "worker_id": "windows-symphony-managed",
+                "running": [
+                    {
+                        "issue_id": "ISSUE-001",
+                        "issue_identifier": "ISSUE-001",
+                        "state": "running",
+                        "attempt_id": lease["attempt"]["id"],
+                        "attempt_number": 1,
+                        "thread_id": "thread-live",
+                        "turn_id": "turn-live",
+                        "session_id": "thread-live",
+                        "turn_count": 2,
+                        "phase": "streaming_turn",
+                        "codex_app_server_pid": 4321,
+                        "last_event": "item/started",
+                        "last_message": "Command started: pytest",
+                        "started_at": "2026-08-05T11:59:00Z",
+                        "last_event_at": "2026-08-05T12:00:00Z",
+                        "duration_seconds": 60,
+                        "workspace_path": "D:/workspaces/ISSUE-001",
+                        "tokens": {
+                            "input_tokens": 100,
+                            "output_tokens": 20,
+                            "total_tokens": 120,
+                        },
+                    }
+                ],
+                "retrying": [],
+                "codex_totals": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "total_tokens": 120,
+                    "seconds_running": 60,
+                },
+                "rate_limits": None,
+            },
+        },
     )
     assert heartbeat.json()["active_issues"] == ["ISSUE-001"]
+    assert heartbeat.json()["runtime_snapshot_at"] is not None
     runtimes = (await api.get("/api/agent-runtimes")).json()
     assert runtimes[0]["state"] == "running"
     assert runtimes[0]["attempt_number"] == 1
+    assert runtimes[0]["runtime_source"] == "orchestrator"
+    assert runtimes[0]["session_id"] == "thread-live"
+    assert runtimes[0]["phase"] == "streaming_turn"
+    assert runtimes[0]["codex_app_server_pid"] == 4321
+    assert runtimes[0]["last_event"] == "item/started"
+    assert runtimes[0]["tokens"]["total_tokens"] == 120
 
 
 async def test_authentication_protects_api_but_not_dashboard(authenticated_api):

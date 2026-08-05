@@ -37,12 +37,15 @@ GET  /api/issues/{id}/decisions
 
 POST /api/issues/{id}/delivery
 GET  /api/agent-runtimes
+POST /api/workers/{worker_id}/heartbeat
 POST /api/maintenance/tick
 ```
 
 Claim 使用版本号做原子 compare-and-set。Claim Token 只在成功领取时返回一次；普通查询只暴露 Worker 和到期时间。Lease 过期后进入 `retry_queued`，维护任务到期后重新置为 `ready`。
 
 `GET /api/issues?state=ready&state=running` 和 `GET /api/issues?id=...` 构成 Control Plane Tracker Adapter 的标准读取内核。API 同时返回 `identifier`、`state`、`labels`、`blocked_by`、`native_ref`、`dispatchable` 等 Symphony 标准化字段。
+
+Worker Heartbeat 携带 Runner 内存中生成的权威 `RuntimeState` 快照。Control Plane 缓存快照及采集时间；`GET /api/agent-runtimes` 对活跃 Agent 优先返回该快照中的 Phase、Session、Codex PID、最近事件、耗时和 Workspace，快照缺失或过期时才回退到 SQLite 历史状态。
 
 ## 生命周期
 

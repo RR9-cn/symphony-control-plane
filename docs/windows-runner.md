@@ -20,6 +20,8 @@ Runner 是 Python 实现的 Windows 原生 Symphony 调度层，直接驱动 Win
 
 Runner 的 Tracker 边界使用 `fetch_issues_by_states` 与 `fetch_issues_by_ids`。Control Plane Adapter 负责把本地记录标准化为 `id`、`identifier`、`state`、`labels`、`blocked_by`、`native_ref` 和 `dispatchable`；最终是否调度由 Runner 决定。
 
+Runner 同时维护唯一权威的内存 `RuntimeState`。每次 Worker Heartbeat 都会上报当前 Running Session 的 Issue、Attempt、Thread、Turn、Phase、Codex PID、最近事件、耗时和 Workspace。Control Plane 只缓存该快照用于监控，不能反向用 UI 或数据库快照驱动 Runner 调度。
+
 普通 Turn 完成不会切换 Issue 状态，也不会创建新 Attempt。达到单进程 `max_turns` 时才短暂释放到重试队列，下一 Attempt 仍复用同一 Workspace 和 Thread，从剩余工作继续。
 
 ## 通用 Agent

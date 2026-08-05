@@ -8,7 +8,8 @@ import os
 import subprocess
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -49,10 +50,102 @@ class RunningEntry:
     task: asyncio.Task[AttemptOutcome] | None = None
     last_event_at: float | None = None
     cancel_reason: str | None = None
+    started_at_utc: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+    phase: str = "claimed"
+    workspace_path: str | None = None
+    thread_id: str | None = None
+    turn_id: str | None = None
+    turn_count: int = 0
+    codex_app_server_pid: int | None = None
+    last_event: str | None = None
+    last_message: str | None = None
+    last_event_at_utc: datetime | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
 
     @property
     def issue_id(self) -> str:
         return self.lease.id
+
+
+@dataclass
+class RuntimeState:
+    """Authoritative in-memory view of this orchestrator's live work."""
+
+    running: dict[str, RunningEntry] = field(default_factory=dict)
+    retry_attempts: dict[str, int] = field(default_factory=dict)
+    completed_runtime_seconds: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    rate_limits: dict[str, Any] | None = None
+
+    def snapshot(self, *, project_id: str, worker_id: str) -> dict[str, Any]:
+        now_monotonic = time.monotonic()
+        running = []
+        active_seconds = 0.0
+        for entry in sorted(
+            self.running.values(), key=lambda item: item.started_at_utc
+        ):
+            duration = max(0.0, now_monotonic - entry.started_at)
+            active_seconds += duration
+            running.append(
+                {
+                    "issue_id": entry.issue_id,
+                    "issue_identifier": str(
+                        entry.issue.get("identifier") or entry.issue_id
+                    ),
+                    "issue_url": entry.issue.get("url"),
+                    "state": str(
+                        entry.issue.get("state")
+                        or entry.issue.get("status")
+                        or "running"
+                    ),
+                    "attempt_id": entry.lease.attempt.get("id"),
+                    "attempt_number": entry.lease.attempt.get("attempt_number"),
+                    # A Codex thread is the durable session. Turn IDs change inside it.
+                    "session_id": entry.thread_id,
+                    "thread_id": entry.thread_id,
+                    "turn_id": entry.turn_id,
+                    "turn_count": entry.turn_count,
+                    "phase": entry.phase,
+                    "codex_app_server_pid": entry.codex_app_server_pid,
+                    "last_event": entry.last_event,
+                    "last_message": entry.last_message,
+                    "started_at": entry.started_at_utc.isoformat(),
+                    "last_event_at": (
+                        entry.last_event_at_utc.isoformat()
+                        if entry.last_event_at_utc
+                        else None
+                    ),
+                    "duration_seconds": round(duration, 3),
+                    "workspace_path": entry.workspace_path,
+                    "tokens": {
+                        "input_tokens": entry.input_tokens,
+                        "output_tokens": entry.output_tokens,
+                        "total_tokens": entry.total_tokens,
+                    },
+                }
+            )
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "project_id": project_id,
+            "worker_id": worker_id,
+            "running": running,
+            "retrying": [],
+            "codex_totals": {
+                "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens,
+                "total_tokens": self.total_tokens,
+                "seconds_running": round(
+                    self.completed_runtime_seconds + active_seconds, 3
+                ),
+            },
+            "rate_limits": self.rate_limits,
+        }
 
 
 CodexFactory = Callable[..., CodexAppServer]
@@ -74,8 +167,9 @@ class WindowsSymphony:
         self._tracker_injected = tracker is not None
         self._workspace_injected = workspace_manager is not None
         self._owns_tracker = tracker is None
-        self._running: dict[str, RunningEntry] = {}
-        self._retry_attempts: dict[str, int] = {}
+        self.runtime_state = RuntimeState()
+        self._running = self.runtime_state.running
+        self._retry_attempts = self.runtime_state.retry_attempts
         self._closed = False
         self._initialized = False
         self._registered = False
@@ -94,6 +188,12 @@ class WindowsSymphony:
     @property
     def workflow_error(self) -> str | None:
         return self._last_workflow_error
+
+    def snapshot(self) -> dict[str, Any]:
+        return self.runtime_state.snapshot(
+            project_id=self.workflow.tracker.project_id,
+            worker_id=self.workflow.tracker.worker_id,
+        )
 
     async def tick(self) -> list[str]:
         if self._closed:
@@ -159,6 +259,7 @@ class WindowsSymphony:
                 workspace_manager=WorkspaceManager(claimed_workflow.workspace),
                 started_at=time.monotonic(),
                 scheduling_state=scheduling_state,
+                phase="claimed",
             )
             entry.task = asyncio.create_task(
                 self._run_claimed(entry), name=f"windows-symphony-{issue_id}"
@@ -217,7 +318,10 @@ class WindowsSymphony:
         codex_task: asyncio.Task[CodexRunResult] | None = None
         try:
             issue = entry.issue
+            entry.phase = "preparing_workspace"
             workspace = (await entry.workspace_manager.prepare(issue)).path
+            entry.workspace_path = str(workspace)
+            entry.phase = "before_run_hook"
             await entry.workspace_manager.before_run(issue, workspace)
             attempt_number = lease.attempt.get("attempt_number")
             attempt = (
@@ -225,6 +329,7 @@ class WindowsSymphony:
                 if isinstance(attempt_number, int) and attempt_number > 1
                 else None
             )
+            entry.phase = "building_prompt"
             prompt = entry.workflow.render_prompt(issue, attempt)
             if lease.resume_thread_id:
                 prompt = (
@@ -237,6 +342,7 @@ class WindowsSymphony:
                     f"<resolved_human_decisions>{json.dumps(lease.resume_decisions, ensure_ascii=False)}</resolved_human_decisions>\n\n"
                     + prompt
                 )
+            entry.phase = "launching_agent"
             codex = self.codex_factory(
                 entry.workflow.agent.codex_config(entry.workflow.codex),
                 secret_environment_names=tuple(
@@ -333,7 +439,35 @@ class WindowsSymphony:
         self, entry: RunningEntry, message: dict[str, Any]
     ) -> None:
         entry.last_event_at = time.monotonic()
+        entry.last_event_at_utc = datetime.now(timezone.utc)
+        method = message.get("method")
+        params = message.get("params")
+        params = params if isinstance(params, dict) else {}
+        if isinstance(method, str):
+            entry.last_event = method
+        if method == "symphony/process_started":
+            process_id = params.get("process_id")
+            entry.codex_app_server_pid = (
+                process_id if isinstance(process_id, int) else None
+            )
+            entry.phase = "initializing_session"
+        elif method == "symphony/session_started":
+            entry.thread_id = _optional_string(params.get("thread_id"))
+            entry.phase = "session_ready"
+        elif method == "symphony/turn_started":
+            entry.thread_id = _optional_string(params.get("thread_id"))
+            entry.turn_id = _optional_string(params.get("turn_id"))
+            turn_count = params.get("turn_count")
+            if isinstance(turn_count, int):
+                entry.turn_count = turn_count
+            entry.phase = "streaming_turn"
+        elif method == "turn/completed":
+            entry.phase = "refreshing_issue"
+        elif method in {"turn/failed", "turn/cancelled"}:
+            entry.phase = "turn_failed"
         event = normalize_codex_event(message)
+        if event is not None:
+            entry.last_message = str(event.get("summary") or method or "")[:1000]
         if event is None or not entry.lease.active:
             return
         with contextlib.suppress(TrackerError):
@@ -408,7 +542,10 @@ class WindowsSymphony:
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        self._running.pop(entry.issue_id, None)
+        if self._running.pop(entry.issue_id, None) is not None:
+            self.runtime_state.completed_runtime_seconds += max(
+                0.0, time.monotonic() - entry.started_at
+            )
         if cleanup:
             with contextlib.suppress(WorkspaceError):
                 removed = await entry.workspace_manager.remove(entry.issue)
@@ -521,7 +658,10 @@ class WindowsSymphony:
             for issue_id, entry in self._running.items()
             if entry.task is not None and not entry.task.done()
         ]
-        worker = await self.tracker.heartbeat_worker(active_issues=active)
+        worker = await self.tracker.heartbeat_worker(
+            active_issues=active,
+            runtime_snapshot=self.snapshot(),
+        )
         self._stop_requested = worker.get("stop_requested") is True
 
     async def _stop_running(self) -> None:
@@ -533,6 +673,10 @@ class WindowsSymphony:
         tasks = [entry.task for entry in entries if entry.task is not None]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        now = time.monotonic()
+        self.runtime_state.completed_runtime_seconds += sum(
+            max(0.0, now - entry.started_at) for entry in entries
+        )
         self._running.clear()
 
     def _reap_finished(self) -> None:
@@ -541,6 +685,9 @@ class WindowsSymphony:
             if task is not None and task.done():
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     task.result()
+                self.runtime_state.completed_runtime_seconds += max(
+                    0.0, time.monotonic() - entry.started_at
+                )
                 del self._running[issue_id]
 
     def _failure_retry_delay(self, issue_id: str, workflow: Workflow) -> int:
@@ -608,6 +755,10 @@ def state_concurrency_available(
 
 def _state(value: object) -> str:
     return str(value or "").strip().lower()
+
+
+def _optional_string(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def _tracker_provider_identity(config: Any) -> tuple[object, ...]:

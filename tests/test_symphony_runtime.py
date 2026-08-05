@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from symphony_windows.codex import CodexAppServer
-from symphony_windows.orchestrator import RunningEntry, WindowsSymphony
+from symphony_windows.orchestrator import RunningEntry, RuntimeState, WindowsSymphony
 from symphony_windows.tracker import ClaimLease
 from symphony_windows.workflow import CodexConfig, load_workflow
 
@@ -68,6 +68,50 @@ class FakeWorkspaces:
     async def remove(self, issue: dict[str, Any]) -> bool:
         self.removed.append(str(issue["id"]))
         return True
+
+
+def test_runtime_state_snapshot_is_authoritative_for_live_session():
+    lease = ClaimLease(
+        issue={"id": "ISSUE-1"},
+        token="token",
+        attempt={"id": "attempt-1", "attempt_number": 3},
+    )
+    entry = RunningEntry(
+        issue={
+            "id": "ISSUE-1",
+            "identifier": "TEAM-1",
+            "state": "running",
+            "url": "https://tracker.example/TEAM-1",
+        },
+        lease=lease,
+        workflow=object(),  # type: ignore[arg-type]
+        tracker=object(),  # type: ignore[arg-type]
+        workspace_manager=object(),  # type: ignore[arg-type]
+        started_at=time.monotonic() - 2,
+        scheduling_state="ready",
+        phase="streaming_turn",
+        workspace_path="D:/workspaces/TEAM-1",
+        thread_id="thread-1",
+        turn_id="turn-2",
+        turn_count=2,
+        codex_app_server_pid=4321,
+        last_event="item/started",
+        last_message="Command started: pytest",
+        input_tokens=100,
+        output_tokens=20,
+        total_tokens=120,
+    )
+    state = RuntimeState(running={lease.id: entry})
+
+    snapshot = state.snapshot(project_id="project-1", worker_id="worker-1")
+
+    assert snapshot["project_id"] == "project-1"
+    assert snapshot["worker_id"] == "worker-1"
+    assert snapshot["running"][0]["session_id"] == "thread-1"
+    assert snapshot["running"][0]["phase"] == "streaming_turn"
+    assert snapshot["running"][0]["codex_app_server_pid"] == 4321
+    assert snapshot["running"][0]["tokens"]["total_tokens"] == 120
+    assert snapshot["codex_totals"]["seconds_running"] >= 2
 
 
 async def test_turn_timeout_is_reset_for_each_app_server_message():

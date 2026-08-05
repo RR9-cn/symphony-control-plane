@@ -82,7 +82,7 @@ class TrackerAdapter(Protocol):
     async def register_worker(self, *, capacity: int) -> dict[str, Any]: ...
 
     async def heartbeat_worker(
-        self, *, active_issues: list[str]
+        self, *, active_issues: list[str], runtime_snapshot: dict[str, Any]
     ) -> dict[str, Any]: ...
 
     async def worker_stopped(self) -> dict[str, Any]: ...
@@ -275,10 +275,16 @@ class ControlPlaneTracker:
             },
         )
 
-    async def heartbeat_worker(self, *, active_issues: list[str]) -> dict[str, Any]:
+    async def heartbeat_worker(
+        self, *, active_issues: list[str], runtime_snapshot: dict[str, Any]
+    ) -> dict[str, Any]:
         return await self._request(
             "POST", f"/api/workers/{quote(self.config.worker_id, safe='')}/heartbeat",
-            json={"state": "running" if active_issues else "idle", "activeIssues": sorted(active_issues)},
+            json={
+                "state": "running" if active_issues else "idle",
+                "activeIssues": sorted(active_issues),
+                "runtimeSnapshot": runtime_snapshot,
+            },
         )
 
     async def worker_stopped(self) -> dict[str, Any]:

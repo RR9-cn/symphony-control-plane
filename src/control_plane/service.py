@@ -88,6 +88,20 @@ def _as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
+def _optional_text(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _optional_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _optional_number(value: object) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
 def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
@@ -520,12 +534,19 @@ class ControlPlaneService:
             values = command.model_dump()
             values["id"] = values.pop("worker_id")
             if worker is None:
-                worker = Worker(**values, state="starting")
+                worker = Worker(
+                    **values,
+                    state="starting",
+                    runtime_snapshot={},
+                    runtime_snapshot_at=None,
+                )
                 self.session.add(worker)
             else:
                 for key, value in values.items():
                     setattr(worker, key, value)
                 worker.state = "starting"
+                worker.runtime_snapshot = {}
+                worker.runtime_snapshot_at = None
                 worker.stop_requested = False
                 worker.stopped_at = None
                 worker.last_seen_at = utc_now()
@@ -536,9 +557,28 @@ class ControlPlaneService:
             worker = await self.session.get(Worker, worker_id)
             if worker is None:
                 raise NotFoundError(f"worker not found: {worker_id}")
+            snapshot = command.runtime_snapshot
+            if snapshot.get("worker_id") != worker_id:
+                raise ConflictError("runtime snapshot worker_id does not match")
+            if snapshot.get("project_id") != worker.project_id:
+                raise ConflictError("runtime snapshot project_id does not match")
+            running = snapshot.get("running")
+            if not isinstance(running, list):
+                raise ConflictError("runtime snapshot running must be a list")
+            snapshot_issue_ids = {
+                str(row.get("issue_id"))
+                for row in running
+                if isinstance(row, dict) and row.get("issue_id")
+            }
+            if snapshot_issue_ids != set(command.active_issues):
+                raise ConflictError(
+                    "runtime snapshot running Issues do not match active_issues"
+                )
             worker.state = command.state
             worker.active_issues = command.active_issues
-            worker.last_seen_at = utc_now()
+            worker.runtime_snapshot = snapshot
+            worker.runtime_snapshot_at = utc_now()
+            worker.last_seen_at = worker.runtime_snapshot_at
         return WorkerView.model_validate(worker)
 
     async def list_workers(self, project_id: str | None = None) -> list[WorkerView]:
@@ -564,22 +604,95 @@ class ControlPlaneService:
                 raise NotFoundError(f"worker not found: {worker_id}")
             worker.state = "stopped"
             worker.active_issues = []
+            worker.runtime_snapshot = {}
+            worker.runtime_snapshot_at = utc_now()
             worker.stopped_at = utc_now()
             worker.last_seen_at = utc_now()
         return WorkerView.model_validate(worker)
 
     async def list_agent_runtimes(self) -> list[AgentRuntimeView]:
         issues = (await self.session.scalars(select(Issue).order_by(Issue.updated_at.desc()))).all()
+        workers = (await self.session.scalars(select(Worker))).all()
+        now = utc_now()
+        live_rows: dict[str, tuple[Worker, dict[str, Any]]] = {}
+        for worker in workers:
+            if worker.runtime_snapshot_at is None:
+                continue
+            age = (now - _as_utc(worker.runtime_snapshot_at)).total_seconds()
+            if age > self.settings.worker_offline_after_seconds:
+                continue
+            rows = worker.runtime_snapshot.get("running")
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict) or not row.get("issue_id"):
+                    continue
+                issue_id = str(row["issue_id"])
+                previous = live_rows.get(issue_id)
+                if previous is None or _as_utc(
+                    worker.runtime_snapshot_at
+                ) > _as_utc(previous[0].runtime_snapshot_at):  # type: ignore[arg-type]
+                    live_rows[issue_id] = (worker, row)
         result: list[AgentRuntimeView] = []
         for issue in issues:
             attempt = await self.session.scalar(select(AgentAttempt).where(AgentAttempt.issue_id == issue.id).order_by(AgentAttempt.attempt_number.desc()).limit(1))
+            live = live_rows.get(issue.id)
+            if live is not None:
+                worker, row = live
+                tokens = row.get("tokens") if isinstance(row.get("tokens"), dict) else {}
+                result.append(
+                    AgentRuntimeView(
+                        issue_id=issue.id,
+                        title=issue.title,
+                        state=RUNTIME_STATE[issue.status],
+                        worker_id=worker.id,
+                        attempt_id=_optional_text(row.get("attempt_id")),
+                        attempt_number=_optional_int(row.get("attempt_number")),
+                        session_id=_optional_text(row.get("session_id")),
+                        thread_id=_optional_text(row.get("thread_id")),
+                        turn_id=_optional_text(row.get("turn_id")),
+                        turn_count=_optional_int(row.get("turn_count")) or 0,
+                        phase=_optional_text(row.get("phase")),
+                        codex_app_server_pid=_optional_int(
+                            row.get("codex_app_server_pid")
+                        ),
+                        last_event=_optional_text(row.get("last_event")),
+                        last_message=_optional_text(row.get("last_message")),
+                        last_event_at=row.get("last_event_at"),
+                        duration_seconds=_optional_number(
+                            row.get("duration_seconds")
+                        ),
+                        workspace_path=_optional_text(row.get("workspace_path")),
+                        tokens={
+                            "input_tokens": _optional_int(tokens.get("input_tokens")) or 0,
+                            "output_tokens": _optional_int(tokens.get("output_tokens")) or 0,
+                            "total_tokens": _optional_int(tokens.get("total_tokens")) or 0,
+                        },
+                        runtime_source="orchestrator",
+                        snapshot_at=worker.runtime_snapshot_at,
+                        started_at=row.get("started_at"),
+                        updated_at=issue.updated_at,
+                    )
+                )
+                continue
             result.append(
                 AgentRuntimeView(
                     issue_id=issue.id, title=issue.title, state=RUNTIME_STATE[issue.status],
                     worker_id=issue.claim_worker_id, attempt_id=attempt.id if attempt else None,
                     attempt_number=attempt.attempt_number if attempt else None,
+                    session_id=attempt.session_id if attempt else None,
                     thread_id=attempt.thread_id if attempt else None, turn_id=attempt.turn_id if attempt else None,
                     turn_count=attempt.turn_count if attempt else 0,
+                    phase="snapshot_unavailable" if issue.status == "running" else None,
+                    codex_app_server_pid=None,
+                    last_event=None,
+                    last_message=attempt.status_reason if attempt else None,
+                    last_event_at=None,
+                    duration_seconds=attempt.duration_seconds if attempt else None,
+                    workspace_path=issue.workspace_path,
+                    tokens={"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                    runtime_source="database",
+                    snapshot_at=None,
                     started_at=attempt.started_at if attempt else None, updated_at=issue.updated_at,
                 )
             )

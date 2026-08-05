@@ -1,4 +1,4 @@
-const state = { token: sessionStorage.getItem("acp_api_token") || "", projects: [], projectId: localStorage.getItem("acp_project_id") || "", issues: [], runtimes: [], workers: [], runner: null, selected: null };
+const state = { token: sessionStorage.getItem("acp_api_token") || "", projects: [], projectId: localStorage.getItem("acp_project_id") || "", issues: [], runtimes: [], workers: [], runner: null, selected: null, decisionDrafts: new Map() };
 const $ = (selector) => document.querySelector(selector);
 const dom = {
   connection: $("#connection"), refresh: $("#refresh-button"), tokenButton: $("#token-button"), newIssue: $("#new-issue-button"), newProject: $("#new-project-button"), projectFilter: $("#project-filter"), projectList: $("#project-list"), projectCount: $("#project-count"),
@@ -14,6 +14,19 @@ const dom = {
 const STATUS = {
   ready: "Ready", running: "Running", retry_queued: "Retry queued", needs_human: "Needs human", blocked: "Blocked",
   reviewing: "Final review", awaiting_publish: "Awaiting publish", pr_open: "PR / MR open", done: "Done", cancelled: "Cancelled",
+};
+const PHASE = {
+  claimed: "已领取",
+  preparing_workspace: "准备 Workspace",
+  before_run_hook: "执行 Before Run Hook",
+  building_prompt: "构建 Prompt",
+  launching_agent: "启动 Codex",
+  initializing_session: "初始化 Session",
+  session_ready: "Session 已就绪",
+  streaming_turn: "Turn 执行中",
+  refreshing_issue: "刷新 Issue 状态",
+  turn_failed: "Turn 失败",
+  snapshot_unavailable: "实时快照不可用",
 };
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
 const short = (value, size = 12) => value ? `${String(value).slice(0, size)}${String(value).length > size ? "…" : ""}` : "—";
@@ -72,7 +85,11 @@ async function refresh() {
     state.issues = issues; state.runtimes = runtimes; state.workers = workers; state.runner = runner;
     dom.connection.textContent = health.auth_enabled && !state.token ? "需要认证" : "已连接";
     render();
-    if (state.selected) await openDetail(state.selected, false);
+    // Replacing detailContent while a decision editor is focused interrupts IME
+    // input and clears the browser selection. The surrounding dashboard can keep
+    // polling; refresh this detail after the user leaves the editor.
+    const editingDecision = document.activeElement?.matches?.("[data-decision-response]");
+    if (state.selected && !editingDecision) await openDetail(state.selected, false);
   } catch (error) {
     dom.connection.textContent = error.status === 401 ? "需要认证" : "连接失败";
     if (error.status === 401) openToken(); else toast(error.message, true);
@@ -109,7 +126,19 @@ function renderRuntimes() {
   const issueIds = new Set(state.issues.filter((issue) => !state.projectId || issue.project_id === state.projectId).map((issue) => issue.id));
   const live = state.runtimes.filter((runtime) => issueIds.has(runtime.issue_id) && !["done", "cancelled"].includes(runtime.state));
   dom.runtimeCount.textContent = live.length;
-  dom.runtimeList.innerHTML = live.length ? live.map((runtime) => `<article class="runtime-card" data-issue-id="${escapeHtml(runtime.issue_id)}"><header><strong>${escapeHtml(runtime.issue_id)}</strong>${badge(runtime.state === "waiting_human" ? "needs_human" : runtime.state)}</header><p>${escapeHtml(runtime.title)}</p><div class="meta"><span>Attempt ${runtime.attempt_number || "—"}</span><span>Turn ${runtime.turn_count || 0}</span><span>Thread ${escapeHtml(short(runtime.thread_id, 10))}</span></div></article>`).join("") : '<div class="empty">暂无活跃 Agent</div>';
+  dom.runtimeList.innerHTML = live.length ? live.map((runtime) => {
+    const authoritative = runtime.runtime_source === "orchestrator";
+    const phase = PHASE[runtime.phase] || runtime.phase || (authoritative ? "运行中" : "非运行状态");
+    return `<article class="runtime-card" data-issue-id="${escapeHtml(runtime.issue_id)}">
+      <header><strong>${escapeHtml(runtime.issue_id)}</strong>${badge(runtime.state === "waiting_human" ? "needs_human" : runtime.state)}</header>
+      <p>${escapeHtml(runtime.title)}</p>
+      <div class="runtime-source ${authoritative ? "live" : "stored"}"><i></i><span>${authoritative ? "ORCHESTRATOR LIVE" : "DATABASE STATE"}</span><strong>${escapeHtml(phase)}</strong></div>
+      <div class="meta"><span>Attempt ${runtime.attempt_number || "—"}</span><span>Turn #${runtime.turn_count || 0}</span>${runtime.codex_app_server_pid ? `<span>Codex PID ${runtime.codex_app_server_pid}</span>` : ""}</div>
+      <div class="attempt-session"><span>Codex Session</span><code title="${escapeHtml(runtime.session_id || "")}">${escapeHtml(short(runtime.session_id, 28))}</code></div>
+      <div class="meta"><span>Thread ${escapeHtml(short(runtime.thread_id, 14))}</span><span>Current Turn ${escapeHtml(short(runtime.turn_id, 14))}</span></div>
+      ${authoritative ? `<div class="runtime-activity"><span>${escapeHtml(runtime.last_message || runtime.last_event || "等待 Agent 事件")}</span><small>${escapeHtml(formatDuration(runtime.duration_seconds))} · 快照 ${escapeHtml(formatDate(runtime.snapshot_at))}</small></div>` : ""}
+    </article>`;
+  }).join("") : '<div class="empty">暂无活跃 Agent</div>';
 }
 
 function renderIssues() {
@@ -143,11 +172,15 @@ async function openDetail(issueId, show = true) {
     ]);
     dom.detailId.textContent = issue.id; dom.detailTitle.textContent = issue.title;
     const latest = attempts[0];
+    const runtime = state.runtimes.find((row) => row.issue_id === issue.id);
     dom.detailContent.innerHTML = `<p class="modal-copy">${escapeHtml(issue.description)}</p><div class="detail-grid">
       <div class="detail-field"><span>Status</span><strong>${escapeHtml(STATUS[issue.status] || issue.status)}</strong></div><div class="detail-field"><span>Priority</span><strong>P${issue.priority}</strong></div>
       <div class="detail-field"><span>Project</span><strong>${escapeHtml(state.projects.find((project) => project.id === issue.project_id)?.name || issue.project_id)}</strong></div><div class="detail-field"><span>Starting commit</span><strong>${escapeHtml(short(issue.source_commit, 16))}</strong></div>
       <div class="detail-field"><span>Workflow revision</span><strong>${escapeHtml(short(issue.workflow_revision, 16))}</strong></div><div class="detail-field"><span>Workspace</span><strong>${escapeHtml(issue.workspace_path)}</strong></div>
-      <div class="detail-field"><span>Worker</span><strong>${escapeHtml(issue.claim.worker_id || "—")}</strong></div><div class="detail-field"><span>Thread / Turn</span><strong>${escapeHtml(latest ? `${short(latest.thread_id, 12)} / ${latest.turn_count}` : "—")}</strong></div>
+      <div class="detail-field"><span>Worker</span><strong>${escapeHtml(issue.claim.worker_id || "—")}</strong></div><div class="detail-field"><span>Codex Session</span><strong title="${escapeHtml(runtime?.session_id || latest?.session_id || "")}">${escapeHtml(short(runtime?.session_id || latest?.session_id, 28))}</strong></div>
+      <div class="detail-field"><span>Thread</span><strong>${escapeHtml(short(runtime?.thread_id || latest?.thread_id, 20))}</strong></div><div class="detail-field"><span>Current Turn</span><strong>${escapeHtml(runtime?.turn_id ? `${short(runtime.turn_id, 20)} (#${runtime.turn_count})` : latest?.turn_id ? `${short(latest.turn_id, 20)} (#${latest.turn_count})` : "—")}</strong></div>
+      <div class="detail-field"><span>Runtime Source</span><strong>${escapeHtml(runtime?.runtime_source === "orchestrator" ? "Orchestrator Live" : "Database")}</strong></div><div class="detail-field"><span>Agent Phase</span><strong>${escapeHtml(PHASE[runtime?.phase] || runtime?.phase || "—")}</strong></div>
+      <div class="detail-field"><span>Last Agent Event</span><strong>${escapeHtml(runtime?.last_event || "—")}</strong></div><div class="detail-field"><span>Codex PID / Duration</span><strong>${escapeHtml(runtime?.codex_app_server_pid || "—")} / ${escapeHtml(formatDuration(runtime?.duration_seconds))}</strong></div>
       <div class="detail-field"><span>Dispatchable</span><strong>${issue.dispatchable ? "Yes" : "No"}</strong></div><div class="detail-field"><span>Labels</span><strong>${escapeHtml(issue.labels.join(", ") || "—")}</strong></div>
     </div>
     <section class="section"><h3>验收标准</h3><ul>${issue.acceptance_criteria.map((value) => `<li>${escapeHtml(value)}</li>`).join("")}</ul></section>
@@ -166,7 +199,7 @@ async function openDetail(issueId, show = true) {
 function renderDecisions(decisions) {
   const open = decisions.filter((decision) => decision.status === "open");
   if (!open.length) return "";
-  return `<section class="section"><h3>等待人工输入</h3>${open.map((decision) => `<article class="decision"><strong>${escapeHtml(decision.question)}</strong>${decision.options.length ? `<p>${decision.options.map(escapeHtml).join(" / ")}</p>` : ""}<textarea data-decision-response="${escapeHtml(decision.id)}" placeholder="填写决定"></textarea><button class="button secondary" data-resolve="${escapeHtml(decision.id)}">提交并恢复 Agent</button></article>`).join("")}</section>`;
+  return `<section class="section"><h3>等待人工输入</h3>${open.map((decision) => `<article class="decision"><strong>${escapeHtml(decision.question)}</strong>${decision.options.length ? `<p>${decision.options.map(escapeHtml).join(" / ")}</p>` : ""}<textarea data-decision-response="${escapeHtml(decision.id)}" placeholder="填写决定">${escapeHtml(state.decisionDrafts.get(decision.id) || "")}</textarea><button class="button secondary" data-resolve="${escapeHtml(decision.id)}">提交并恢复 Agent</button></article>`).join("")}</section>`;
 }
 
 function renderActions(issue) {
@@ -208,7 +241,8 @@ $("#token-cancel-button").addEventListener("click", () => dom.tokenModal.close()
 dom.issueList.addEventListener("click", (event) => { const card = event.target.closest("[data-issue-id]"); if (card) openDetail(card.dataset.issueId); });
 dom.runtimeList.addEventListener("click", (event) => { const card = event.target.closest("[data-issue-id]"); if (card) openDetail(card.dataset.issueId); });
 dom.detailActions.addEventListener("click", (event) => { const button = event.target.closest("[data-action]"); if (button) runAction(button.dataset.action, button.dataset.version); });
-dom.detailContent.addEventListener("click", async (event) => { const button = event.target.closest("[data-resolve]"); if (!button) return; const response = dom.detailContent.querySelector(`[data-decision-response="${CSS.escape(button.dataset.resolve)}"]`).value.trim(); if (!response) return; try { await api(`/api/issues/${encodeURIComponent(state.selected)}/decisions`, { method: "POST", body: JSON.stringify({ action: "resolve", decision_id: button.dataset.resolve, response, actor_id: "control-plane-ui" }) }); toast("决定已提交，Issue 已恢复 Ready"); await refresh(); } catch (error) { toast(error.message, true); } });
+dom.detailContent.addEventListener("input", (event) => { const editor = event.target.closest("[data-decision-response]"); if (editor) state.decisionDrafts.set(editor.dataset.decisionResponse, editor.value); });
+dom.detailContent.addEventListener("click", async (event) => { const button = event.target.closest("[data-resolve]"); if (!button) return; const response = dom.detailContent.querySelector(`[data-decision-response="${CSS.escape(button.dataset.resolve)}"]`).value.trim(); if (!response) return; try { await api(`/api/issues/${encodeURIComponent(state.selected)}/decisions`, { method: "POST", body: JSON.stringify({ action: "resolve", decision_id: button.dataset.resolve, response, actor_id: "control-plane-ui" }) }); state.decisionDrafts.delete(button.dataset.resolve); toast("决定已提交，Issue 已恢复 Ready"); await refresh(); } catch (error) { toast(error.message, true); } });
 $("#detail-close").addEventListener("click", () => { state.selected = null; dom.detailModal.close(); });
 window.setInterval(() => { if (!document.hidden && !dom.issueModal.open && !dom.projectModal.open && !dom.tokenModal.open) refresh(); }, 5000);
 refresh();

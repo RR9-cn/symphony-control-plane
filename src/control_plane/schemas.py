@@ -274,6 +274,9 @@ class WorkerRegistration(ApiModel):
 class WorkerHeartbeat(ApiModel):
     state: Literal["starting", "idle", "running", "stopping"]
     active_issues: list[str] = Field(default_factory=list, validation_alias=AliasChoices("active_issues", "activeIssues"))
+    runtime_snapshot: dict[str, Any] = Field(
+        validation_alias=AliasChoices("runtime_snapshot", "runtimeSnapshot")
+    )
 
     @model_validator(mode="after")
     def unique_issues(self) -> "WorkerHeartbeat":
@@ -290,6 +293,8 @@ class WorkerView(ApiModel):
     version: str
     capacity: int
     active_issues: list[str]
+    runtime_snapshot: dict[str, Any]
+    runtime_snapshot_at: datetime | None
     state: str
     stop_requested: bool
     started_at: datetime
@@ -304,9 +309,20 @@ class AgentRuntimeView(ApiModel):
     worker_id: str | None
     attempt_id: str | None
     attempt_number: int | None
+    session_id: str | None
     thread_id: str | None
     turn_id: str | None
     turn_count: int
+    phase: str | None
+    codex_app_server_pid: int | None
+    last_event: str | None
+    last_message: str | None
+    last_event_at: datetime | None
+    duration_seconds: float | None
+    workspace_path: str | None
+    tokens: dict[str, int]
+    runtime_source: Literal["orchestrator", "database"]
+    snapshot_at: datetime | None
     started_at: datetime | None
     updated_at: datetime
 
