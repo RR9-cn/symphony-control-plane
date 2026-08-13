@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import secrets
@@ -41,6 +42,8 @@ from control_plane.schemas import (
     EventCreate,
     EventView,
     HeartbeatRequest,
+    IssueContinueCommand,
+    IssueArchiveCommand,
     IssueCreate,
     IssueDeliveryCommand,
     IssuePatch,
@@ -53,7 +56,13 @@ from control_plane.schemas import (
     WorkerRegistration,
     WorkerView,
 )
-from symphony_windows.workspace import workspace_key
+from control_plane.workspace_summary import (
+    WorkspaceSummaryError,
+    collect_change_summary,
+    empty_change_summary,
+)
+from symphony_windows.workflow import WorkspaceConfig
+from symphony_windows.workspace import WorkspaceError, WorkspaceManager, workspace_key
 
 
 ACTIVE_STATUSES = {"ready", "running", "retry_queued", "needs_human", "blocked", "reviewing", "awaiting_publish", "pr_open"}
@@ -69,6 +78,11 @@ RUNTIME_STATE = {
     "done": "done",
     "cancelled": "cancelled",
 }
+FOLLOW_UP_REQUESTED_BY = "control-plane-followup"
+FOLLOW_UP_QUESTION = (
+    "Authoritative follow-up execution instruction. Apply this instruction to the "
+    "existing Issue workspace before completing the Issue again."
+)
 TRANSITIONS = {
     ("running", "reviewing", "agent_completed"),
     ("running", "needs_human", "human_input_requested"),
@@ -273,16 +287,51 @@ class ControlPlaneService:
         latest_previous = await self.session.scalar(
             select(AgentAttempt).where(AgentAttempt.issue_id == issue_id, AgentAttempt.id != attempt.id, AgentAttempt.thread_id.is_not(None)).order_by(AgentAttempt.attempt_number.desc()).limit(1)
         )
-        decisions = (
+        decisions = list(
             await self.session.scalars(
                 select(HumanDecision).where(HumanDecision.issue_id == issue_id, HumanDecision.status == "resolved").order_by(HumanDecision.created_at)
             )
+        )
+        # Follow-up decisions are also sent through the long-standing
+        # resume_decisions field so already-running, older Workers do not silently
+        # drop a newly introduced continuation field. Only the decisions created
+        # after the previous Attempt completed belong to this resume.
+        if latest_previous is not None and latest_previous.completed_at is not None:
+            decisions = [
+                row
+                for row in decisions
+                if row.requested_by != FOLLOW_UP_REQUESTED_BY
+                or row.created_at > latest_previous.completed_at
+            ]
+        follow_up_payloads = (
+            await self.session.scalars(
+                select(IssueEvent.payload)
+                .where(
+                    IssueEvent.issue_id == issue_id,
+                    IssueEvent.event == "human_followup_requested",
+                    *(
+                        (IssueEvent.created_at > latest_previous.completed_at,)
+                        if latest_previous is not None
+                        and latest_previous.completed_at is not None
+                        else ()
+                    ),
+                )
+                .order_by(IssueEvent.created_at)
+            )
         ).all()
+        resume_instructions = [
+            instruction
+            for payload in follow_up_payloads
+            if isinstance(payload, dict)
+            for instruction in [payload.get("instruction")]
+            if isinstance(instruction, str) and instruction.strip()
+        ]
         return ClaimResult(
             issue=await self.get_issue(issue_id), claim_token=token,
             attempt=AgentAttemptView.model_validate(attempt),
             resume_thread_id=latest_previous.thread_id if latest_previous else None,
             resume_decisions=[DecisionView.model_validate(row) for row in decisions],
+            resume_instructions=resume_instructions,
             continuation_turn_count=latest_previous.turn_count if latest_previous else 0,
             workflow_content=snapshot.workflow_content,
         )
@@ -342,6 +391,49 @@ class ControlPlaneService:
             self._add_event(issue_id, command.event, command.actor_type, actor_id, from_status, command.to_status, command.payload)
         return await self.get_issue(issue_id)
 
+    async def continue_issue(
+        self, issue_id: str, command: IssueContinueCommand
+    ) -> IssueView:
+        async with self.session.begin():
+            issue = await self._require_issue(issue_id)
+            if issue.status != "reviewing":
+                raise ConflictError(
+                    f"issue cannot continue from status={issue.status}"
+                )
+            if issue.version != command.expected_version:
+                raise ConflictError("issue version changed")
+            issue.status = "ready"
+            issue.retry_at = None
+            issue.blocker = None
+            issue.version += 1
+            issue.updated_at = utc_now()
+            # Persist the instruction as an already-resolved human decision as
+            # well as an Issue event. Older Workers already understand
+            # resume_decisions, which makes continuation backward compatible
+            # while Workers are upgraded independently from the Control Plane.
+            self.session.add(
+                HumanDecision(
+                    issue_id=issue_id,
+                    question=FOLLOW_UP_QUESTION,
+                    options=[],
+                    status="resolved",
+                    response=command.instruction,
+                    requested_by=FOLLOW_UP_REQUESTED_BY,
+                    resolved_by="control-plane-ui",
+                    resolved_at=utc_now(),
+                )
+            )
+            self._add_event(
+                issue_id,
+                "human_followup_requested",
+                "human",
+                "control-plane-ui",
+                "reviewing",
+                "ready",
+                {"instruction": command.instruction},
+            )
+        return await self.get_issue(issue_id)
+
     async def deliver_issue(self, issue_id: str, command: IssueDeliveryCommand) -> IssueView:
         issue = await self._require_issue(issue_id)
         if issue.version != command.expected_version:
@@ -352,12 +444,19 @@ class ControlPlaneService:
         repository_url = project.repository_path
         base_branch = project.default_branch
         delivery_identifier = issue.identifier
-        delivery = IssueDeliveryManager(Path(issue.workspace_path).parent, gitlab_token=self.gitlab_token)
+        source_commit = issue.source_commit
+        workspace_path = Path(issue.workspace_path)
+        delivery = IssueDeliveryManager(workspace_path.parent, gitlab_token=self.gitlab_token)
         status = issue.status
         title = issue.title
         head_branch = issue.head_branch
         local_commit = issue.local_commit
         pull_request_url = issue.pull_request
+        overview = (
+            await self.latest_change_overview(issue_id)
+            if command.action == "approve_result"
+            else None
+        )
         # SQLAlchemy starts a transaction for the read above. End that read
         # transaction before invoking git/GitHub, then use a fresh transaction
         # to compare-and-set the delivery state after the side effect succeeds.
@@ -366,9 +465,21 @@ class ControlPlaneService:
             if status != "reviewing":
                 raise ConflictError(f"issue cannot approve result while status={status}")
             try:
+                await delivery.assert_base_unchanged(
+                    source_repository=repository_url,
+                    base_branch=base_branch,
+                    expected_commit=source_commit,
+                )
                 branch, commit = await delivery.prepare_local_commit(delivery_identifier, title)
             except DeliveryError as error:
                 raise ConflictError(str(error)) from error
+            try:
+                change_summary = await collect_change_summary(
+                    workspace_path, source_commit, overview=overview
+                )
+            except (OSError, WorkspaceSummaryError):
+                change_summary = empty_change_summary()
+                change_summary["overview"] = overview
             async with self.session.begin():
                 current = await self._require_issue(issue_id)
                 if current.status != "reviewing" or current.version != command.expected_version:
@@ -376,6 +487,7 @@ class ControlPlaneService:
                 current.status = "awaiting_publish"
                 current.head_branch = branch
                 current.local_commit = commit
+                current.change_summary = change_summary
                 current.version += 1
                 current.updated_at = utc_now()
                 self._add_event(issue_id, "result_approved", "human", "control-plane-ui", "reviewing", "awaiting_publish", {"branch": branch, "commit": commit})
@@ -383,6 +495,12 @@ class ControlPlaneService:
             if status != "awaiting_publish" or not head_branch or not local_commit:
                 raise ConflictError(f"issue cannot publish while status={status}")
             try:
+                await delivery.assert_base_is_ancestor(
+                    delivery_identifier,
+                    source_repository=repository_url,
+                    base_branch=base_branch,
+                    commit=local_commit,
+                )
                 review_request = await delivery.publish(
                     delivery_identifier, repository_url=repository_url, base_branch=base_branch,
                     branch=head_branch, commit=local_commit, title=title,
@@ -416,6 +534,117 @@ class ControlPlaneService:
                 current.updated_at = utc_now()
                 self._add_event(issue_id, "review_request_merged", "human", "control-plane-ui", "pr_open", "done", {"review_request": current.pull_request})
         return await self.get_issue(issue_id)
+
+    async def archive_issue(
+        self, issue_id: str, command: IssueArchiveCommand
+    ) -> IssueView:
+        issue = await self._require_issue(issue_id)
+        if issue.version != command.expected_version:
+            raise ConflictError("issue version changed")
+        if issue.archived_at is not None:
+            return await self._issue_view(issue)
+        identifier = issue.identifier
+        project_id = issue.project_id
+        source_commit = issue.source_commit
+        workspace = Path(issue.workspace_path).resolve()
+        root = workspace.parent
+        expected_workspace = (root / workspace_key(identifier)).resolve()
+        if workspace != expected_workspace:
+            raise ConflictError("Issue workspace path does not match its identifier")
+        archive_version = command.expected_version
+        original_status = issue.status
+        change_summary = dict(issue.change_summary or empty_change_summary())
+        overview = await self.latest_change_overview(issue_id)
+        await self.session.rollback()
+        try:
+            change_summary = await collect_change_summary(
+                workspace, source_commit, overview=overview
+            )
+        except (OSError, WorkspaceSummaryError):
+            if overview:
+                change_summary["overview"] = overview
+        if original_status not in {"done", "cancelled"}:
+            async with self.session.begin():
+                current = await self._require_issue(issue_id)
+                if current.version != command.expected_version:
+                    raise ConflictError("issue changed while requesting archive")
+                if current.status == "running":
+                    await self._finish_attempt(issue_id, "cancelled")
+                    self._clear_claim(current)
+                current.status = "cancelled"
+                current.retry_at = None
+                current.blocker = None
+                current.change_summary = change_summary
+                current.version += 1
+                current.updated_at = utc_now()
+                self._add_event(
+                    issue_id,
+                    "force_archive_cancelled",
+                    "human",
+                    "control-plane-ui",
+                    original_status,
+                    "cancelled",
+                    {"reason": "force_archive"},
+                )
+                archive_version = current.version
+
+        for _attempt in range(30):
+            if not await self._live_worker_owns_issue(
+                project_id, issue_id, identifier
+            ):
+                break
+            await self.session.rollback()
+            await asyncio.sleep(0.5)
+        else:
+            raise ConflictError(
+                "Issue was cancelled but its Runner is still stopping; retry force archive shortly"
+            )
+        await self.session.rollback()
+        try:
+            removed = await WorkspaceManager(WorkspaceConfig(root=root)).remove(
+                {"id": issue_id, "identifier": identifier}
+            )
+        except WorkspaceError as error:
+            raise ConflictError(str(error)) from error
+        async with self.session.begin():
+            current = await self._require_issue(issue_id)
+            if current.version != archive_version:
+                raise ConflictError("issue changed while archiving workspace")
+            if current.status not in {"done", "cancelled"}:
+                raise ConflictError("issue is no longer terminal")
+            current.archived_at = utc_now()
+            current.change_summary = change_summary
+            current.version += 1
+            current.updated_at = current.archived_at
+            self._add_event(
+                issue_id,
+                "workspace_force_archived",
+                "human",
+                "control-plane-ui",
+                current.status,
+                current.status,
+                {"workspace": str(workspace), "removed": removed},
+            )
+        return await self.get_issue(issue_id)
+
+    async def _live_worker_owns_issue(
+        self, project_id: str, issue_id: str, identifier: str
+    ) -> bool:
+        workers = (
+            await self.session.scalars(
+                select(Worker).where(
+                    Worker.project_id == project_id,
+                    Worker.state.in_(("starting", "running", "stopping")),
+                )
+            )
+        ).all()
+        now = utc_now()
+        return any(
+            (now - _as_utc(worker.last_seen_at)).total_seconds()
+            <= self.settings.worker_offline_after_seconds
+            and (issue_id in worker.active_issues or identifier in worker.active_issues)
+            for worker in workers
+        )
 
     async def update_attempt_context(self, issue_id: str, command: AttemptContextUpdate) -> AgentAttemptView:
         async with self.session.begin():
@@ -725,13 +954,16 @@ class ControlPlaneService:
         return MaintenanceResult(expired=expired, readied=readied)
 
     async def _issue_view(self, issue: Issue) -> IssueView:
-        artifacts = (await self.session.scalars(select(IssueArtifact).where(IssueArtifact.issue_id == issue.id).order_by(IssueArtifact.created_at))).all()
+        artifacts = (await self.session.scalars(select(IssueArtifact).where(IssueArtifact.issue_id == issue.id).order_by(IssueArtifact.created_at.desc()))).all()
         snapshot = await self.session.get(ProjectWorkflowSnapshot, issue.workflow_snapshot_id)
         project = await self.session.get(Project, issue.project_id)
         if snapshot is None:
             raise ConflictError("issue workflow snapshot is unavailable")
         if project is None:
             raise ConflictError("issue project is unavailable")
+        change_summary = dict(issue.change_summary or empty_change_summary())
+        if not change_summary.get("overview"):
+            change_summary["overview"] = await self.latest_change_overview(issue.id)
         return IssueView(
             id=issue.id, identifier=issue.identifier, title=issue.title,
             description=issue.description, state=issue.status, status=issue.status,
@@ -748,9 +980,30 @@ class ControlPlaneService:
             claim=ClaimView(worker_id=issue.claim_worker_id, expires_at=issue.claim_expires_at),
             retry_at=issue.retry_at, head_branch=issue.head_branch, local_commit=issue.local_commit,
             pull_request=issue.pull_request, merged_at=issue.merged_at,
+            archived_at=_as_utc(issue.archived_at) if issue.archived_at else None,
+            change_summary=change_summary,
             artifacts=[ArtifactView.model_validate(row) for row in artifacts],
             created_at=issue.created_at, updated_at=issue.updated_at,
         )
+
+    async def latest_change_overview(self, issue_id: str) -> str | None:
+        """Return the latest completed Agent message as the human change overview."""
+        detail = await self.session.scalar(
+            select(AgentAttemptEvent.detail)
+            .where(
+                AgentAttemptEvent.issue_id == issue_id,
+                AgentAttemptEvent.event_type == "agent_message_completed",
+                AgentAttemptEvent.detail.is_not(None),
+            )
+            .order_by(
+                AgentAttemptEvent.created_at.desc(),
+                AgentAttemptEvent.sequence.desc(),
+            )
+            .limit(1)
+        )
+        if not isinstance(detail, str) or not detail.strip():
+            return None
+        return detail.strip()[:4000]
 
     async def _require_issue(self, issue_id: str) -> Issue:
         issue = await self.session.get(Issue, issue_id)

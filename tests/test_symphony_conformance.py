@@ -14,7 +14,7 @@ from symphony_windows.orchestrator import (
     state_concurrency_available,
 )
 from symphony_windows.tracker import ClaimLease
-from symphony_windows.workflow import WorkflowError, load_workflow
+from symphony_windows.workflow import WorkflowError, _parse_front_matter, load_workflow
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +48,49 @@ def test_workflow_normalizes_dispatch_policy_and_state_limits(tmp_path, monkeypa
     assert workflow.tracker.active_states == ("ready", "running")
     assert workflow.tracker.terminal_states == ("done", "cancelled")
     assert workflow.agent.max_concurrent_agents_by_state == {"ready": 1, "running": 2}
+
+
+def test_workflow_supports_optional_front_matter_and_agent_defaults(
+    tmp_path, monkeypatch
+):
+    assert _parse_front_matter("Prompt only\n") == ({}, "Prompt only\n")
+    monkeypatch.setenv("CONTROL_PLANE_TOKEN", "test-token")
+    path = tmp_path / "WORKFLOW.md"
+    path.write_text(
+        """---
+tracker:
+  kind: fshows_control_plane
+  required_labels: [""]
+  active_states: [ready, running]
+  terminal_states: [done, cancelled]
+  provider:
+    token: $CONTROL_PLANE_TOKEN
+---
+""",
+        encoding="utf-8",
+    )
+
+    workflow = load_workflow(path)
+
+    assert workflow.agent.max_concurrent_agents == 10
+    assert workflow.agent.max_turns == 20
+    assert workflow.tracker.required_labels == ("",)
+    assert workflow.prompt_template.startswith("You are working on an issue")
+
+
+def test_invalid_per_state_concurrency_entries_are_ignored(tmp_path, monkeypatch):
+    workflow = _workflow(
+        tmp_path,
+        monkeypatch,
+        (
+            (
+                "max_concurrent_agents_by_state: {}",
+                "max_concurrent_agents_by_state:\n    ready: 2\n    blank: 0\n    bad: nope",
+            ),
+        ),
+    )
+
+    assert workflow.agent.max_concurrent_agents_by_state == {"ready": 2}
 
 
 def test_workflow_rejects_overlapping_active_and_terminal_states(tmp_path, monkeypatch):

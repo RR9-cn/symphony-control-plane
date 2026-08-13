@@ -130,6 +130,48 @@ class ArtifactView(ArtifactData):
     created_at: datetime
 
 
+class ArtifactContentView(ApiModel):
+    id: str
+    path: str
+    media_type: str
+    size_bytes: int
+    content: str | None
+    truncated: bool
+    current_sha256: str
+    registered_sha256_matches: bool | None
+
+
+class WorkspaceChangeSummaryView(ApiModel):
+    available: bool
+    overview: str | None = None
+    files_total: int
+    files_added: int
+    files_modified: int
+    files_deleted: int
+    files_renamed: int
+    files_untracked: int
+    additions: int
+    deletions: int
+    binary_files: int
+    commit_count: int
+    areas: list[str]
+    changed_paths: list[str]
+    commit_subjects: list[str]
+
+
+class WorkspaceReviewView(ApiModel):
+    workspace_path: str
+    base_commit: str
+    head_commit: str
+    commits: list[str]
+    changed_files: list[str]
+    status: list[str]
+    diff_stat: str
+    diff: str
+    diff_truncated: bool
+    change_summary: WorkspaceChangeSummaryView
+
+
 class IssueView(ApiModel):
     id: str
     identifier: str
@@ -160,6 +202,8 @@ class IssueView(ApiModel):
     local_commit: str | None
     pull_request: str | None
     merged_at: datetime | None
+    archived_at: datetime | None
+    change_summary: WorkspaceChangeSummaryView
     artifacts: list[ArtifactView]
     created_at: datetime
     updated_at: datetime
@@ -201,6 +245,34 @@ class IssueDeliveryCommand(ApiModel):
         if not self.authorization:
             raise ValueError("explicit delivery authorization is required")
         return self
+
+
+class IssueArchiveCommand(ApiModel):
+    expected_version: int = Field(
+        validation_alias=AliasChoices("expected_version", "expectedVersion"), ge=1
+    )
+    authorization: bool = False
+
+    @model_validator(mode="after")
+    def require_authorization(self) -> "IssueArchiveCommand":
+        if not self.authorization:
+            raise ValueError("explicit archive authorization is required")
+        return self
+
+
+class IssueContinueCommand(ApiModel):
+    expected_version: int = Field(
+        validation_alias=AliasChoices("expected_version", "expectedVersion"), ge=1
+    )
+    instruction: str = Field(min_length=1, max_length=16000)
+
+    @field_validator("instruction")
+    @classmethod
+    def normalize_instruction(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("instruction must not be blank")
+        return normalized
 
 
 class AgentConfigSnapshot(ApiModel):
@@ -374,6 +446,7 @@ class ClaimResult(ApiModel):
     attempt: AgentAttemptView
     resume_thread_id: str | None = None
     resume_decisions: list[DecisionView] = Field(default_factory=list)
+    resume_instructions: list[str] = Field(default_factory=list)
     continuation_turn_count: int = Field(default=0, ge=0)
     workflow_content: str
 

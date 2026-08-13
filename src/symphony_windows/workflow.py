@@ -42,6 +42,14 @@ class HookConfig:
 
 
 @dataclass(frozen=True)
+class SkillSourceConfig:
+    repository: str
+    revision: str
+    source_path: str = "coding"
+    target_path: str = ".codex/skills"
+
+
+@dataclass(frozen=True)
 class WorkspaceConfig:
     root: Path
     hooks: HookConfig = field(default_factory=HookConfig)
@@ -104,6 +112,7 @@ class Workflow:
     tracker: TrackerConfig
     polling_interval_ms: int
     workspace: WorkspaceConfig
+    skills: SkillSourceConfig | None
     agent: AgentConfig
     codex: CodexConfig
     prompt_template: str
@@ -134,7 +143,7 @@ def load_workflow(
         source = source_override
     front, prompt = _parse_front_matter(source)
     if not prompt.strip():
-        raise WorkflowError("WORKFLOW.md prompt body is required")
+        prompt = "You are working on an issue from the configured tracker."
 
     tracker_data = _mapping(front.get("tracker"), "tracker")
     if tracker_data.get("kind") not in {"fshows_control_plane", "windows_control_plane"}:
@@ -150,7 +159,9 @@ def load_workflow(
         raise WorkflowError("SYMPHONY_PROJECT_ID is required")
     worker_id = worker_id_override or os.getenv("SYMPHONY_WORKER_ID") or _resolve(provider.get("worker_id")) or f"windows-{socket.gethostname()}-{os.getpid()}"
     required_labels = _normalized_strings(
-        tracker_data.get("required_labels", []), "tracker.required_labels"
+        tracker_data.get("required_labels", []),
+        "tracker.required_labels",
+        allow_blank=True,
     )
     active_states = _normalized_strings(
         tracker_data.get("active_states", ["ready", "running"]),
@@ -183,13 +194,32 @@ def load_workflow(
     root = _path(raw_root, workflow_path.parent, Path(tempfile.gettempdir()) / "symphony_workspaces")
     hooks_data = _mapping(front.get("hooks"), "hooks")
     hooks = HookConfig(
-        after_create=_optional(hooks_data.get("after_create")), before_run=_optional(hooks_data.get("before_run")),
-        after_run=_optional(hooks_data.get("after_run")), before_remove=_optional(hooks_data.get("before_remove")),
+        after_create=_optional_script(hooks_data.get("after_create"), "hooks.after_create"),
+        before_run=_optional_script(hooks_data.get("before_run"), "hooks.before_run"),
+        after_run=_optional_script(hooks_data.get("after_run"), "hooks.after_run"),
+        before_remove=_optional_script(hooks_data.get("before_remove"), "hooks.before_remove"),
         timeout_ms=_integer(hooks_data.get("timeout_ms", 60000), 1, 3600000, "hooks.timeout_ms"),
     )
 
-    if "agent" not in front:
-        raise WorkflowError("agent section is required")
+    skills_data = _mapping(front.get("skills"), "skills")
+    skills = None
+    if skills_data:
+        skills_revision = _required(skills_data.get("revision"), "skills.revision").lower()
+        if len(skills_revision) != 40 or any(character not in "0123456789abcdef" for character in skills_revision):
+            raise WorkflowError("skills.revision must be a full 40-character Git commit")
+        source_path = _relative_posix_path(
+            skills_data.get("source_path", "coding"), "skills.source_path"
+        )
+        target_path = _relative_posix_path(
+            skills_data.get("target_path", ".codex/skills"), "skills.target_path"
+        )
+        skills = SkillSourceConfig(
+            repository=_required(skills_data.get("repository"), "skills.repository"),
+            revision=skills_revision,
+            source_path=source_path,
+            target_path=target_path,
+        )
+
     agent_data = _mapping(front.get("agent"), "agent")
     sandbox = str(agent_data.get("sandbox", "danger-full-access"))
     if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
@@ -224,6 +254,7 @@ def load_workflow(
         path=workflow_path, tracker=tracker,
         polling_interval_ms=_integer(polling.get("interval_ms", 30000), 100, 3600000, "polling.interval_ms"),
         workspace=WorkspaceConfig(root=root, hooks=hooks),
+        skills=skills,
         agent=agent, codex=codex, prompt_template=prompt,
         required_environment=tuple(sorted(name for name in [token_env] if name)),
     )
@@ -232,7 +263,7 @@ def load_workflow(
 def _parse_front_matter(source: str) -> tuple[dict[str, Any], str]:
     normalized = source.replace("\r\n", "\n")
     if not normalized.startswith("---\n"):
-        raise WorkflowError("WORKFLOW.md requires YAML front matter")
+        return {}, normalized
     end = normalized.find("\n---\n", 4)
     if end < 0:
         raise WorkflowError("WORKFLOW.md front matter is not terminated")
@@ -282,6 +313,22 @@ def _optional(value: Any) -> str | None:
     return _resolve(value)
 
 
+def _optional_script(value: Any, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise WorkflowError(f"{name} must be a string")
+    return value.strip() or None
+
+
+def _relative_posix_path(value: Any, name: str) -> str:
+    text = _required(value, name).replace("\\", "/")
+    path = PurePosixPath(text)
+    if path.is_absolute() or not path.parts or ".." in path.parts:
+        raise WorkflowError(f"{name} must stay inside the checkout")
+    return path.as_posix()
+
+
 def _integer(value: Any, minimum: int, maximum: int, name: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or not minimum <= value <= maximum:
         raise WorkflowError(f"{name} must be between {minimum} and {maximum}")
@@ -300,17 +347,23 @@ def _boolean(value: Any, name: str) -> bool:
     return value
 
 
-def _strings(value: Any, name: str) -> tuple[str, ...]:
-    if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
+def _strings(
+    value: Any, name: str, *, allow_blank: bool = False
+) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise WorkflowError(f"{name} must be a string list")
     result = tuple(item.strip() for item in value)
+    if not allow_blank and any(not item for item in result):
+        raise WorkflowError(f"{name} must not contain blank values")
     if len(set(result)) != len(result):
         raise WorkflowError(f"{name} must be unique")
     return result
 
 
-def _normalized_strings(value: Any, name: str) -> tuple[str, ...]:
-    values = _strings(value, name)
+def _normalized_strings(
+    value: Any, name: str, *, allow_blank: bool = False
+) -> tuple[str, ...]:
+    values = _strings(value, name, allow_blank=allow_blank)
     normalized = tuple(item.strip().lower() for item in values)
     if len(set(normalized)) != len(normalized):
         raise WorkflowError(f"{name} must be unique after normalization")
@@ -323,20 +376,15 @@ def _state_limits(value: Any) -> dict[str, int]:
     result: dict[str, int] = {}
     for raw_state, raw_limit in value.items():
         state = str(raw_state).strip().lower()
-        if not state:
-            raise WorkflowError(
-                "agent.max_concurrent_agents_by_state state names must not be blank"
-            )
-        if state in result:
-            raise WorkflowError(
-                "agent.max_concurrent_agents_by_state contains duplicate normalized states"
-            )
-        result[state] = _integer(
-            raw_limit,
-            1,
-            100,
-            f"agent.max_concurrent_agents_by_state.{raw_state}",
-        )
+        if (
+            not state
+            or state in result
+            or not isinstance(raw_limit, int)
+            or isinstance(raw_limit, bool)
+            or not 1 <= raw_limit <= 100
+        ):
+            continue
+        result[state] = raw_limit
     return result
 
 

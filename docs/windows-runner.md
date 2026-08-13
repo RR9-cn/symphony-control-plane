@@ -20,7 +20,9 @@ Runner 是 Python 实现的 Windows 原生 Symphony 调度层，直接驱动 Win
 
 Runner 的 Tracker 边界使用 `fetch_issues_by_states` 与 `fetch_issues_by_ids`。Control Plane Adapter 负责把本地记录标准化为 `id`、`identifier`、`state`、`labels`、`blocked_by`、`native_ref` 和 `dispatchable`；最终是否调度由 Runner 决定。
 
-Runner 同时维护唯一权威的内存 `RuntimeState`。每次 Worker Heartbeat 都会上报当前 Running Session 的 Issue、Attempt、Thread、Turn、Phase、Codex PID、最近事件、耗时和 Workspace。Control Plane 只缓存该快照用于监控，不能反向用 UI 或数据库快照驱动 Runner 调度。
+Runner 同时维护唯一权威的内存 `RuntimeState`。每次 Worker Heartbeat 都会上报当前 Running Session、Retry Queue、Attempt、Thread、Turn、Phase、Codex PID、最近事件、Token、Rate Limit、耗时和 Workspace。`session_id` 按官方规范由 `<thread_id>-<turn_id>` 组成；可恢复的长期对话身份是单独的 `thread_id`。Control Plane 只缓存该快照用于监控，不能反向用 UI 或数据库快照驱动 Runner 调度。
+
+Codex Token 统计只接受绝对 Thread 总量，并用相邻报告的差值累计，避免重复事件造成双计；`last_token_usage` 等增量载荷不作为 Dashboard 总量。CLI JSON 日志把 `issue_id`、`issue_identifier`、`session_id`、`action` 和 `outcome` 输出为独立结构化字段。
 
 普通 Turn 完成不会切换 Issue 状态，也不会创建新 Attempt。达到单进程 `max_turns` 时才短暂释放到重试队列，下一 Attempt 仍复用同一 Workspace 和 Thread，从剩余工作继续。
 

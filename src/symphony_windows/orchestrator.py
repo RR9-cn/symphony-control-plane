@@ -9,7 +9,7 @@ import subprocess
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -71,17 +71,36 @@ class RunningEntry:
         return self.lease.id
 
 
+@dataclass(frozen=True)
+class RetryEntry:
+    issue_id: str
+    identifier: str
+    issue_url: str | None
+    attempt: int
+    due_at_monotonic: float
+    due_at_utc: datetime
+    error: str | None = None
+
+
 @dataclass
 class RuntimeState:
     """Authoritative in-memory view of this orchestrator's live work."""
 
     running: dict[str, RunningEntry] = field(default_factory=dict)
-    retry_attempts: dict[str, int] = field(default_factory=dict)
+    retry_attempts: dict[str, RetryEntry] = field(default_factory=dict)
+    completed: set[str] = field(default_factory=set)
     completed_runtime_seconds: float = 0.0
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
+    thread_token_totals: dict[str, tuple[int, int, int]] = field(
+        default_factory=dict
+    )
     rate_limits: dict[str, Any] | None = None
+
+    @property
+    def claimed(self) -> set[str]:
+        return set(self.running) | set(self.retry_attempts)
 
     def snapshot(self, *, project_id: str, worker_id: str) -> dict[str, Any]:
         now_monotonic = time.monotonic()
@@ -106,8 +125,11 @@ class RuntimeState:
                     ),
                     "attempt_id": entry.lease.attempt.get("id"),
                     "attempt_number": entry.lease.attempt.get("attempt_number"),
-                    # A Codex thread is the durable session. Turn IDs change inside it.
-                    "session_id": entry.thread_id,
+                    "session_id": (
+                        f"{entry.thread_id}-{entry.turn_id}"
+                        if entry.thread_id and entry.turn_id
+                        else None
+                    ),
                     "thread_id": entry.thread_id,
                     "turn_id": entry.turn_id,
                     "turn_count": entry.turn_count,
@@ -130,12 +152,29 @@ class RuntimeState:
                     },
                 }
             )
+        retrying = [
+            {
+                "issue_id": retry.issue_id,
+                "issue_identifier": retry.identifier,
+                "issue_url": retry.issue_url,
+                "attempt": retry.attempt,
+                "due_at": retry.due_at_utc.isoformat(),
+                "delay_seconds": round(
+                    max(0.0, retry.due_at_monotonic - now_monotonic), 3
+                ),
+                "error": retry.error,
+            }
+            for retry in sorted(
+                self.retry_attempts.values(),
+                key=lambda item: item.due_at_monotonic,
+            )
+        ]
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "project_id": project_id,
             "worker_id": worker_id,
             "running": running,
-            "retrying": [],
+            "retrying": retrying,
             "codex_totals": {
                 "input_tokens": self.input_tokens,
                 "output_tokens": self.output_tokens,
@@ -212,6 +251,7 @@ class WindowsSymphony:
             return []
         await self._register_worker()
         await self.tracker.maintenance_tick()
+        self._activate_due_retries()
         available = self.workflow.agent.max_concurrent_agents - len(self._running)
         if available <= 0:
             return []
@@ -229,7 +269,7 @@ class WindowsSymphony:
             issue_id = str(issue.get("id", ""))
             if not issue_dispatch_eligible(issue, self.workflow):
                 continue
-            if issue_id in self._running:
+            if issue_id in self.runtime_state.claimed:
                 continue
             scheduling_state = _state(issue.get("state"))
             if not state_concurrency_available(
@@ -264,6 +304,7 @@ class WindowsSymphony:
             entry.task = asyncio.create_task(
                 self._run_claimed(entry), name=f"windows-symphony-{issue_id}"
             )
+            self._retry_attempts.pop(issue_id, None)
             self._running[issue_id] = entry
             running_by_state[scheduling_state] += 1
             dispatched.append(issue_id)
@@ -271,6 +312,7 @@ class WindowsSymphony:
                 "issue_id=%s issue_identifier=%s action=dispatch outcome=started",
                 issue_id,
                 entry.issue.get("identifier", issue_id),
+                extra=_log_context(entry, action="dispatch", outcome="started"),
             )
         await self._heartbeat_worker()
         return dispatched
@@ -336,12 +378,54 @@ class WindowsSymphony:
                     "Continue the existing Issue in this resumed Codex thread. "
                     "Reuse prior work and finish the remaining scope.\n\n" + prompt
                 )
-            if lease.resume_decisions:
+            follow_up_decisions = [
+                decision
+                for decision in lease.resume_decisions
+                if decision.get("requested_by") == "control-plane-followup"
+            ]
+            resolved_decisions = [
+                decision
+                for decision in lease.resume_decisions
+                if decision.get("requested_by") != "control-plane-followup"
+            ]
+            if resolved_decisions:
                 prompt = (
                     "Resolved human decisions are authoritative. Apply them without asking again:\n"
-                    f"<resolved_human_decisions>{json.dumps(lease.resume_decisions, ensure_ascii=False)}</resolved_human_decisions>\n\n"
+                    f"<resolved_human_decisions>{json.dumps(resolved_decisions, ensure_ascii=False)}</resolved_human_decisions>\n\n"
                     + prompt
                 )
+            follow_up_instructions = list(lease.resume_instructions)
+            for decision in follow_up_decisions:
+                response = decision.get("response")
+                if (
+                    isinstance(response, str)
+                    and response.strip()
+                    and response not in follow_up_instructions
+                ):
+                    follow_up_instructions.append(response)
+            if follow_up_instructions:
+                prompt = (
+                    "The following human follow-up instructions are the highest-priority scope "
+                    "for this resumed Turn. Execute them in the existing workspace before "
+                    "completing the Issue again. Do not merely revalidate or revise earlier "
+                    "artifacts unless that is what the instructions explicitly request:\n"
+                    f"<human_followup_instructions>{json.dumps(follow_up_instructions, ensure_ascii=False)}</human_followup_instructions>\n\n"
+                    + prompt
+                )
+                with contextlib.suppress(TrackerError):
+                    await entry.tracker.add_attempt_event(
+                        entry.lease,
+                        {
+                            "event_type": "human_followup_injected",
+                            "status": "completed",
+                            "summary": "Human follow-up instructions injected into the resumed Turn",
+                            "detail": "\n\n".join(follow_up_instructions),
+                            "payload": {
+                                "instruction_count": len(follow_up_instructions),
+                                "instructions": follow_up_instructions,
+                            },
+                        },
+                    )
             entry.phase = "launching_agent"
             codex = self.codex_factory(
                 entry.workflow.agent.codex_config(entry.workflow.codex),
@@ -385,6 +469,11 @@ class WindowsSymphony:
                     retry_delay_seconds=1,
                     thread_id=result.thread_id,
                 )
+                self._queue_retry(
+                    entry,
+                    delay_seconds=1,
+                    error="continuation_after_max_turns",
+                )
                 return AttemptOutcome(
                     issue_id,
                     "retry_queued",
@@ -403,14 +492,15 @@ class WindowsSymphony:
                 codex_task.cancel()
             if lease.active:
                 reason = entry.cancel_reason or "runner_shutdown"
-                delay = self._failure_retry_delay(issue_id, entry.workflow) if reason == "stall_timeout" else 1
+                delay = self._failure_retry_delay(entry) if reason == "stall_timeout" else 1
                 with contextlib.suppress(TrackerError):
                     await entry.tracker.release(
                         lease, reason, retry_delay_seconds=delay
                     )
+                self._queue_retry(entry, delay_seconds=delay, error=reason)
             raise
         except (CodexError, TrackerError, WorkflowError, WorkspaceError, OSError) as error:
-            delay = self._failure_retry_delay(issue_id, entry.workflow)
+            delay = self._failure_retry_delay(entry)
             if lease.active:
                 with contextlib.suppress(TrackerError):
                     await entry.tracker.release(
@@ -418,10 +508,21 @@ class WindowsSymphony:
                         f"agent_attempt_failed: {error}",
                         retry_delay_seconds=delay,
                     )
+                self._queue_retry(
+                    entry,
+                    delay_seconds=delay,
+                    error=f"agent_attempt_failed: {error}",
+                )
             logger.exception(
                 "issue_id=%s issue_identifier=%s action=run outcome=retrying",
                 issue_id,
                 entry.issue.get("identifier", issue_id),
+                extra=_log_context(
+                    entry,
+                    action="run",
+                    outcome="retrying",
+                    reason=str(error),
+                ),
             )
             return AttemptOutcome(issue_id, "retry_queued", error=str(error))
         finally:
@@ -445,6 +546,29 @@ class WindowsSymphony:
         params = params if isinstance(params, dict) else {}
         if isinstance(method, str):
             entry.last_event = method
+        token_totals = _extract_absolute_token_totals(message)
+        if token_totals is not None:
+            input_tokens, output_tokens, total_tokens = token_totals
+            token_key = entry.thread_id or entry.issue_id
+            previous_input, previous_output, previous_total = (
+                self.runtime_state.thread_token_totals.get(token_key, (0, 0, 0))
+            )
+            self.runtime_state.input_tokens += max(
+                0, input_tokens - previous_input
+            )
+            self.runtime_state.output_tokens += max(
+                0, output_tokens - previous_output
+            )
+            self.runtime_state.total_tokens += max(
+                0, total_tokens - previous_total
+            )
+            self.runtime_state.thread_token_totals[token_key] = token_totals
+            entry.input_tokens = input_tokens
+            entry.output_tokens = output_tokens
+            entry.total_tokens = total_tokens
+        rate_limits = _extract_rate_limits(message)
+        if rate_limits is not None:
+            self.runtime_state.rate_limits = rate_limits
         if method == "symphony/process_started":
             process_id = params.get("process_id")
             entry.codex_app_server_pid = (
@@ -465,6 +589,24 @@ class WindowsSymphony:
             entry.phase = "refreshing_issue"
         elif method in {"turn/failed", "turn/cancelled"}:
             entry.phase = "turn_failed"
+        if method in {
+            "symphony/process_started",
+            "symphony/session_started",
+            "symphony/turn_started",
+            "turn/completed",
+            "turn/failed",
+            "turn/cancelled",
+        }:
+            logger.info(
+                "action=agent_session outcome=event event=%s",
+                method,
+                extra=_log_context(
+                    entry,
+                    action="agent_session",
+                    outcome="event",
+                    event=_optional_string(method),
+                ),
+            )
         event = normalize_codex_event(message)
         if event is not None:
             entry.last_message = str(event.get("summary") or method or "")[:1000]
@@ -492,6 +634,12 @@ class WindowsSymphony:
                     "issue_id=%s issue_identifier=%s action=reconcile outcome=stalled",
                     entry.issue_id,
                     entry.issue.get("identifier", entry.issue_id),
+                    extra=_log_context(
+                        entry,
+                        action="reconcile",
+                        outcome="stalled",
+                        reason="stall_timeout",
+                    ),
                 )
                 await self._cancel_entry(entry, "stall_timeout", cleanup=False)
 
@@ -523,12 +671,14 @@ class WindowsSymphony:
                     self.workflow if entry.tracker is self.tracker else entry.workflow
                 )
                 if state in effective_workflow.tracker.terminal_states:
+                    self._retry_attempts.pop(entry.issue_id, None)
                     entry.lease.active = False
                     await self._cancel_entry(entry, "issue_terminal", cleanup=True)
                 elif (
                     state not in effective_workflow.tracker.active_states
                     or not issue_routable(issue, effective_workflow)
                 ):
+                    self._retry_attempts.pop(entry.issue_id, None)
                     entry.lease.active = False
                     await self._cancel_entry(
                         entry, "issue_no_longer_routable", cleanup=False
@@ -546,6 +696,7 @@ class WindowsSymphony:
             self.runtime_state.completed_runtime_seconds += max(
                 0.0, time.monotonic() - entry.started_at
             )
+            self.runtime_state.completed.add(entry.issue_id)
         if cleanup:
             with contextlib.suppress(WorkspaceError):
                 removed = await entry.workspace_manager.remove(entry.issue)
@@ -554,6 +705,11 @@ class WindowsSymphony:
                     entry.issue_id,
                     entry.issue.get("identifier", entry.issue_id),
                     "removed" if removed else "absent",
+                    extra=_log_context(
+                        entry,
+                        action="workspace_cleanup",
+                        outcome="removed" if removed else "absent",
+                    ),
                 )
 
     async def _ensure_initialized(self) -> None:
@@ -688,17 +844,46 @@ class WindowsSymphony:
                 self.runtime_state.completed_runtime_seconds += max(
                     0.0, time.monotonic() - entry.started_at
                 )
+                self.runtime_state.completed.add(issue_id)
                 del self._running[issue_id]
 
-    def _failure_retry_delay(self, issue_id: str, workflow: Workflow) -> int:
-        attempt = self._retry_attempts.get(issue_id, 0) + 1
-        self._retry_attempts[issue_id] = attempt
+    def _activate_due_retries(self) -> None:
+        now = time.monotonic()
+        for issue_id, retry in list(self._retry_attempts.items()):
+            if retry.due_at_monotonic <= now:
+                self._retry_attempts.pop(issue_id, None)
+
+    def _failure_retry_delay(self, entry: RunningEntry) -> int:
+        raw_attempt = entry.lease.attempt.get("attempt_number")
+        attempt = raw_attempt if isinstance(raw_attempt, int) and raw_attempt > 0 else 1
         return max(
             1,
             min(
                 10 * (2 ** min(attempt - 1, 20)),
-                workflow.agent.max_retry_backoff_ms // 1000,
+                entry.workflow.agent.max_retry_backoff_ms // 1000,
             ),
+        )
+
+    def _queue_retry(
+        self,
+        entry: RunningEntry,
+        *,
+        delay_seconds: int,
+        error: str | None,
+    ) -> None:
+        raw_attempt = entry.lease.attempt.get("attempt_number")
+        attempt = raw_attempt if isinstance(raw_attempt, int) and raw_attempt > 0 else 1
+        now_utc = datetime.now(timezone.utc)
+        self._retry_attempts[entry.issue_id] = RetryEntry(
+            issue_id=entry.issue_id,
+            identifier=str(
+                entry.issue.get("identifier") or entry.issue_id
+            ),
+            issue_url=_optional_string(entry.issue.get("url")),
+            attempt=attempt,
+            due_at_monotonic=time.monotonic() + delay_seconds,
+            due_at_utc=now_utc + timedelta(seconds=delay_seconds),
+            error=error,
         )
 
 
@@ -759,6 +944,116 @@ def _state(value: object) -> str:
 
 def _optional_string(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _log_context(
+    entry: RunningEntry,
+    *,
+    action: str,
+    outcome: str,
+    reason: str | None = None,
+    event: str | None = None,
+) -> dict[str, object]:
+    session_id = (
+        f"{entry.thread_id}-{entry.turn_id}"
+        if entry.thread_id and entry.turn_id
+        else None
+    )
+    return {
+        "issue_id": entry.issue_id,
+        "issue_identifier": str(
+            entry.issue.get("identifier") or entry.issue_id
+        ),
+        "session_id": session_id,
+        "thread_id": entry.thread_id,
+        "turn_id": entry.turn_id,
+        "action": action,
+        "outcome": outcome,
+        "reason": reason,
+        "event": event,
+    }
+
+
+def _normalized_key(value: object) -> str:
+    return "".join(character for character in str(value).lower() if character.isalnum())
+
+
+def _find_named_mapping(value: object, names: set[str]) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if _normalized_key(key) in names and isinstance(nested, dict):
+                return nested
+        for nested in value.values():
+            found = _find_named_mapping(nested, names)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for nested in value:
+            found = _find_named_mapping(nested, names)
+            if found is not None:
+                return found
+    return None
+
+
+def _token_value(value: object, names: set[str]) -> int | None:
+    if not isinstance(value, dict):
+        return None
+    for key, nested in value.items():
+        if _normalized_key(key) in names and isinstance(nested, (int, float)):
+            return max(0, int(nested))
+    for nested in value.values():
+        result = _token_value(nested, names)
+        if result is not None:
+            return result
+    return None
+
+
+def _extract_absolute_token_totals(
+    message: dict[str, Any],
+) -> tuple[int, int, int] | None:
+    method = _normalized_key(message.get("method"))
+    total_usage = _find_named_mapping(
+        message, {"totaltokenusage", "totaltokensusage"}
+    )
+    if total_usage is None and method == "threadtokenusageupdated":
+        usage = _find_named_mapping(message, {"tokenusage"})
+        if usage is not None:
+            total_usage = _find_named_mapping(
+                usage, {"total", "totaltokenusage", "totaltokens"}
+            ) or usage
+    if total_usage is None:
+        return None
+    input_tokens = _token_value(
+        total_usage,
+        {"inputtokens", "inputtokencount", "input"},
+    )
+    output_tokens = _token_value(
+        total_usage,
+        {"outputtokens", "outputtokencount", "output"},
+    )
+    total_tokens = _token_value(
+        total_usage,
+        {"totaltokens", "totaltokencount", "total"},
+    )
+    if input_tokens is None and output_tokens is None and total_tokens is None:
+        return None
+    input_tokens = input_tokens or 0
+    output_tokens = output_tokens or 0
+    total_tokens = total_tokens if total_tokens is not None else input_tokens + output_tokens
+    return input_tokens, output_tokens, total_tokens
+
+
+def _extract_rate_limits(message: dict[str, Any]) -> dict[str, Any] | None:
+    method = _normalized_key(message.get("method"))
+    payload = _find_named_mapping(message, {"ratelimit", "ratelimits"})
+    if payload is None and "ratelimit" in method:
+        params = message.get("params")
+        payload = params if isinstance(params, dict) else None
+    if payload is None:
+        return None
+    # Detach the snapshot from the mutable protocol message while retaining
+    # provider-specific fields for forward compatibility.
+    return json.loads(json.dumps(payload, ensure_ascii=False, default=str))
 
 
 def _tracker_provider_identity(config: Any) -> tuple[object, ...]:

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
 import re
+import signal
 import shutil
 import stat
 from dataclasses import dataclass
@@ -65,7 +67,7 @@ class WorkspaceManager:
                 # No Agent has run in a newly created workspace. Remove a failed
                 # partial clone so the next dispatch can execute after_create again.
                 if resolved != root and resolved.is_relative_to(root):
-                    shutil.rmtree(resolved, ignore_errors=True)
+                    await asyncio.shield(_remove_tree(resolved))
                 raise
         return prepared
 
@@ -93,7 +95,7 @@ class WorkspaceManager:
             return False
         await self.run_hook("before_remove", issue, workspace, ignore_failure=True)
         try:
-            shutil.rmtree(workspace, onerror=_remove_readonly)
+            await _remove_tree(workspace)
         except OSError as error:
             raise WorkspaceError(f"cannot remove Issue workspace {workspace}: {error}") from error
         return True
@@ -131,6 +133,11 @@ class WorkspaceManager:
                 "SYMPHONY_WORKFLOW_REVISION": str(issue.get("workflow_revision", "")),
             }
         )
+        subprocess_options: dict[str, object] = {}
+        if os.name != "nt":
+            # A separate process group lets cancellation terminate hook children
+            # as well as the PowerShell process itself.
+            subprocess_options["start_new_session"] = True
         process = await asyncio.create_subprocess_exec(
             executable,
             "-NoLogo",
@@ -144,6 +151,7 @@ class WorkspaceManager:
             env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **subprocess_options,
         )
         try:
             stdout, stderr = await asyncio.wait_for(
@@ -151,11 +159,16 @@ class WorkspaceManager:
                 timeout=hooks.timeout_ms / 1000,
             )
         except TimeoutError as error:
-            process.kill()
-            await process.wait()
+            await asyncio.shield(_terminate_process_tree(process))
             if ignore_failure:
                 return
             raise WorkspaceError(f"hook {name} timed out") from error
+        except BaseException:
+            # asyncio cancellation does not automatically terminate subprocesses.
+            # Kill the complete PowerShell/Git tree before prepare() removes the
+            # partial workspace, otherwise a surviving clone can recreate files.
+            await asyncio.shield(_terminate_process_tree(process))
+            raise
         if process.returncode != 0 and not ignore_failure:
             details = (stderr or stdout).decode("utf-8", errors="replace").strip()
             raise WorkspaceError(f"hook {name} failed ({process.returncode}): {details}")
@@ -179,3 +192,49 @@ def workspace_key(identifier: str) -> str:
 def _remove_readonly(function: Any, path: str, _error: object) -> None:
     os.chmod(path, stat.S_IWRITE)
     function(path)
+
+
+async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
+    """Best-effort termination for a hook and every process it spawned."""
+    if os.name == "nt" and process.pid is not None:
+        with contextlib.suppress(OSError, TimeoutError):
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill",
+                "/PID",
+                str(process.pid),
+                "/T",
+                "/F",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(killer.communicate(), timeout=10)
+    elif process.pid is not None:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+
+    if process.returncode is None:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+    with contextlib.suppress(ProcessLookupError, TimeoutError):
+        await asyncio.wait_for(process.wait(), timeout=5)
+
+
+async def _remove_tree(path: Path, attempts: int = 5) -> None:
+    """Remove a workspace after subprocess shutdown, retrying Windows handle races."""
+    last_error: OSError | None = None
+    for attempt in range(attempts):
+        if not path.exists():
+            return
+        try:
+            await asyncio.to_thread(shutil.rmtree, path, onerror=_remove_readonly)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            last_error = error
+        if not path.exists():
+            return
+        if attempt + 1 < attempts:
+            await asyncio.sleep(0.1 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+    raise OSError(f"workspace directory still exists after cleanup: {path}")

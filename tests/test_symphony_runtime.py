@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from symphony_windows.codex import CodexAppServer
-from symphony_windows.orchestrator import RunningEntry, RuntimeState, WindowsSymphony
+from symphony_windows.cli import JsonFormatter
+from symphony_windows.orchestrator import (
+    RetryEntry,
+    RunningEntry,
+    RuntimeState,
+    WindowsSymphony,
+)
 from symphony_windows.tracker import ClaimLease
 from symphony_windows.workflow import CodexConfig, load_workflow
 
@@ -107,11 +116,141 @@ def test_runtime_state_snapshot_is_authoritative_for_live_session():
 
     assert snapshot["project_id"] == "project-1"
     assert snapshot["worker_id"] == "worker-1"
-    assert snapshot["running"][0]["session_id"] == "thread-1"
+    assert snapshot["running"][0]["session_id"] == "thread-1-turn-2"
     assert snapshot["running"][0]["phase"] == "streaming_turn"
     assert snapshot["running"][0]["codex_app_server_pid"] == 4321
     assert snapshot["running"][0]["tokens"]["total_tokens"] == 120
     assert snapshot["codex_totals"]["seconds_running"] >= 2
+
+
+def test_runtime_state_snapshot_includes_retry_queue():
+    now = datetime.now(timezone.utc)
+    retry = RetryEntry(
+        issue_id="ISSUE-2",
+        identifier="TEAM-2",
+        issue_url="https://tracker.example/TEAM-2",
+        attempt=3,
+        due_at_monotonic=time.monotonic() + 30,
+        due_at_utc=now + timedelta(seconds=30),
+        error="temporary failure",
+    )
+    snapshot = RuntimeState(retry_attempts={retry.issue_id: retry}).snapshot(
+        project_id="project-1", worker_id="worker-1"
+    )
+
+    assert snapshot["retrying"][0]["issue_id"] == "ISSUE-2"
+    assert snapshot["retrying"][0]["attempt"] == 3
+    assert snapshot["retrying"][0]["delay_seconds"] > 0
+    assert snapshot["retrying"][0]["error"] == "temporary failure"
+
+
+async def test_codex_telemetry_uses_absolute_totals_without_double_counting():
+    lease = ClaimLease(issue={"id": "ISSUE-1"}, token="token", attempt={})
+    lease.active = False
+    entry = RunningEntry(
+        issue={"id": "ISSUE-1", "identifier": "TEAM-1"},
+        lease=lease,
+        workflow=object(),  # type: ignore[arg-type]
+        tracker=object(),  # type: ignore[arg-type]
+        workspace_manager=object(),  # type: ignore[arg-type]
+        started_at=time.monotonic(),
+        scheduling_state="ready",
+        thread_id="thread-1",
+    )
+    symphony = WindowsSymphony.__new__(WindowsSymphony)
+    symphony.runtime_state = RuntimeState()
+    first = {
+        "method": "thread/tokenUsage/updated",
+        "params": {
+            "tokenUsage": {
+                "total": {
+                    "inputTokens": 100,
+                    "outputTokens": 20,
+                    "totalTokens": 120,
+                },
+                "last": {"inputTokens": 1000, "outputTokens": 1000},
+            }
+        },
+    }
+
+    await symphony._record_codex_event(entry, first)
+    await symphony._record_codex_event(entry, first)
+    await symphony._record_codex_event(
+        entry,
+        {
+            "method": "codex/event/token_count",
+            "params": {
+                "msg": {
+                    "total_token_usage": {
+                        "input_tokens": 130,
+                        "output_tokens": 30,
+                        "total_tokens": 160,
+                    },
+                    "last_token_usage": {"total_tokens": 9999},
+                }
+            },
+        },
+    )
+    await symphony._record_codex_event(
+        entry,
+        {
+            "method": "account/rateLimits/updated",
+            "params": {"rateLimits": {"primary": {"usedPercent": 64}}},
+        },
+    )
+
+    assert entry.total_tokens == 160
+    assert symphony.runtime_state.total_tokens == 160
+    assert symphony.runtime_state.input_tokens == 130
+    assert symphony.runtime_state.output_tokens == 30
+    assert symphony.runtime_state.rate_limits == {
+        "primary": {"usedPercent": 64}
+    }
+
+    resumed_entry = RunningEntry(
+        issue={"id": "ISSUE-1", "identifier": "TEAM-1"},
+        lease=lease,
+        workflow=object(),  # type: ignore[arg-type]
+        tracker=object(),  # type: ignore[arg-type]
+        workspace_manager=object(),  # type: ignore[arg-type]
+        started_at=time.monotonic(),
+        scheduling_state="ready",
+        thread_id="thread-1",
+    )
+    await symphony._record_codex_event(
+        resumed_entry,
+        {
+            "method": "thread/tokenUsage/updated",
+            "params": {
+                "tokenUsage": {
+                    "total": {
+                        "inputTokens": 130,
+                        "outputTokens": 30,
+                        "totalTokens": 160,
+                    }
+                }
+            },
+        },
+    )
+    assert symphony.runtime_state.total_tokens == 160
+
+
+def test_json_logs_expose_structured_session_context():
+    record = logging.LogRecord(
+        "symphony", logging.INFO, __file__, 1, "agent started", (), None
+    )
+    record.issue_id = "opaque-1"
+    record.issue_identifier = "TEAM-1"
+    record.session_id = "thread-1-turn-1"
+    record.action = "agent_session"
+    record.outcome = "started"
+
+    payload = json.loads(JsonFormatter().format(record))
+
+    assert payload["issue_id"] == "opaque-1"
+    assert payload["issue_identifier"] == "TEAM-1"
+    assert payload["session_id"] == "thread-1-turn-1"
+    assert payload["action"] == "agent_session"
 
 
 async def test_turn_timeout_is_reset_for_each_app_server_message():

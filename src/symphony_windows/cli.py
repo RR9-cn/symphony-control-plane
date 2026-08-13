@@ -18,6 +18,22 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
+        for field in (
+            "issue_id",
+            "issue_identifier",
+            "session_id",
+            "thread_id",
+            "turn_id",
+            "worker_id",
+            "project_id",
+            "action",
+            "outcome",
+            "reason",
+            "event",
+        ):
+            value = getattr(record, field, None)
+            if value is not None:
+                payload[field] = value
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=False)

@@ -32,6 +32,7 @@ class ClaimLease:
     attempt: dict[str, Any]
     resume_thread_id: str | None = None
     resume_decisions: list[dict[str, Any]] = field(default_factory=list)
+    resume_instructions: list[str] = field(default_factory=list)
     continuation_turn_count: int = 0
     workflow_content: str = ""
     active: bool = True
@@ -233,6 +234,7 @@ class ControlPlaneTracker:
             issue=_normalize_issue(claimed, self.config), token=token, attempt=attempt,
             resume_thread_id=payload.get("resume_thread_id"),
             resume_decisions=payload.get("resume_decisions", []),
+            resume_instructions=payload.get("resume_instructions", []),
             continuation_turn_count=payload.get("continuation_turn_count", 0),
             workflow_content=str(payload.get("workflow_content") or ""),
         )

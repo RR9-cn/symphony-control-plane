@@ -75,12 +75,14 @@ Turn 是 Attempt 内部事件，不驱动宏观状态来回切换。
 - [x] `identifier`、`labels`、`blocked_by`、`native_ref`、`dispatchable` 标准化；
 - [x] `required_labels`、活动/终态配置和按状态并发调度；
 - [x] Runner 权威 `RuntimeState.snapshot()`、Worker Heartbeat 快照上报与 Agent 实时状态 UI；
+- [x] Runtime Retry Queue、Codex Token/Rate Limit 聚合与标准 `/api/v1` 监控接口；
+- [x] 官方 Session ID 语义、结构化日志上下文和 `WORKFLOW.md` 默认/前向兼容规则；
 - [x] 新协议、脚本和自动化回归测试。
 
 ## 5. 后续任务
 
 1. Workspace Retention：支持按保留期延迟清理终态 Issue，并把清理结果登记为审计事件。
-2. 运行指标：在现有实时 Session、Turn Count、耗时和错误快照上补充 Token 与 Rate Limit 聚合。
+2. Real Integration Profile：把真实 Codex App Server、Hook 和测试 Tracker 冒烟验证固化为可选发布检查。
 3. 扩展 Tracker Provider：在现有 Control Plane Adapter 之外按需接入 Linear、GitHub 等 Provider。
 
 这些任务不能重新引入固定生命周期或阶段角色；它们都应围绕 `Issue → Agent Session → Workspace` 的 Symphony 调度模型扩展。

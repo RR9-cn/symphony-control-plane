@@ -1,10 +1,10 @@
-const state = { token: sessionStorage.getItem("acp_api_token") || "", projects: [], projectId: localStorage.getItem("acp_project_id") || "", issues: [], runtimes: [], workers: [], runner: null, selected: null, decisionDrafts: new Map() };
+const state = { token: sessionStorage.getItem("acp_api_token") || "", projects: [], projectId: localStorage.getItem("acp_project_id") || "", showInactive: localStorage.getItem("acp_show_inactive") === "true", issues: [], runtimes: [], workers: [], runner: null, selected: null, decisionDrafts: new Map(), followUpDrafts: new Map() };
 const $ = (selector) => document.querySelector(selector);
 const dom = {
   connection: $("#connection"), refresh: $("#refresh-button"), tokenButton: $("#token-button"), newIssue: $("#new-issue-button"), newProject: $("#new-project-button"), projectFilter: $("#project-filter"), projectList: $("#project-list"), projectCount: $("#project-count"),
   runnerState: $("#runner-state"), runnerDetail: $("#runner-detail"), runnerButton: $("#runner-button"),
   total: $("#metric-total"), running: $("#metric-running"), human: $("#metric-human"), done: $("#metric-done"),
-  runtimeCount: $("#runtime-count"), runtimeList: $("#runtime-list"), issueList: $("#issue-list"), search: $("#issue-search"),
+  runtimeCount: $("#runtime-count"), runtimeList: $("#runtime-list"), issueList: $("#issue-list"), search: $("#issue-search"), showInactive: $("#show-inactive"),
   issueModal: $("#issue-modal"), issueForm: $("#issue-form"), issueError: $("#issue-error"),
   projectModal: $("#project-modal"), projectForm: $("#project-form"), projectError: $("#project-error"),
   detailModal: $("#detail-modal"), detailId: $("#detail-id"), detailTitle: $("#detail-title"), detailContent: $("#detail-content"), detailActions: $("#detail-actions"), detailError: $("#detail-error"),
@@ -31,6 +31,8 @@ const PHASE = {
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
 const short = (value, size = 12) => value ? `${String(value).slice(0, size)}${String(value).length > size ? "…" : ""}` : "—";
 const formatDate = (value) => value ? new Date(value).toLocaleString() : "—";
+const formatTokens = (value) => Number(value || 0).toLocaleString();
+const compactTelemetry = (value) => value == null ? "—" : short(JSON.stringify(value), 120);
 function formatDuration(seconds) {
   const value = Number(seconds);
   if (!Number.isFinite(value)) return "—";
@@ -58,7 +60,9 @@ async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (options.body) headers.set("Content-Type", "application/json");
   if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
-  const response = await fetch(path, { ...options, headers });
+  // Runtime and project snapshots change independently of the page assets.
+  // Never let the browser reuse an older GET response after validation.
+  const response = await fetch(path, { cache: "no-store", ...options, headers });
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
     try { message = (await response.json()).error?.message || message; } catch (_) { /* noop */ }
@@ -73,8 +77,9 @@ function toast(message, error = false) {
 }
 
 function badge(status) { return `<span class="badge ${escapeHtml(status)}">${escapeHtml(STATUS[status] || status)}</span>`; }
+function isVisibleIssue(issue) { return state.showInactive || (issue.status !== "cancelled" && !issue.archived_at); }
 
-async function refresh() {
+async function refresh({ refreshDetail = true } = {}) {
   dom.refresh.disabled = true;
   try {
     const [health, projects, issues, runtimes, workers, runner] = await Promise.all([
@@ -89,7 +94,7 @@ async function refresh() {
     // input and clears the browser selection. The surrounding dashboard can keep
     // polling; refresh this detail after the user leaves the editor.
     const editingDecision = document.activeElement?.matches?.("[data-decision-response]");
-    if (state.selected && !editingDecision) await openDetail(state.selected, false);
+    if (refreshDetail && state.selected && !editingDecision) await openDetail(state.selected, false);
   } catch (error) {
     dom.connection.textContent = error.status === 401 ? "需要认证" : "连接失败";
     if (error.status === 401) openToken(); else toast(error.message, true);
@@ -97,13 +102,15 @@ async function refresh() {
 }
 
 function render() {
+  const visibleIssues = state.issues.filter(isVisibleIssue);
   const options = state.projects.map((project) => `<option value="${escapeHtml(project.id)}" ${project.id === state.projectId ? "selected" : ""}>${escapeHtml(project.name)} · ${escapeHtml(project.status)}</option>`).join("");
   dom.projectFilter.innerHTML = options || '<option value="">请先新增项目</option>';
   dom.issueForm.elements.project_id.innerHTML = options || '<option value="">请先新增项目</option>';
-  dom.total.textContent = state.issues.length;
-  dom.running.textContent = state.issues.filter((issue) => issue.status === "running").length;
-  dom.human.textContent = state.issues.filter((issue) => ["needs_human", "reviewing", "awaiting_publish", "pr_open"].includes(issue.status)).length;
-  dom.done.textContent = state.issues.filter((issue) => issue.status === "done").length;
+  dom.showInactive.checked = state.showInactive;
+  dom.total.textContent = visibleIssues.length;
+  dom.running.textContent = visibleIssues.filter((issue) => issue.status === "running").length;
+  dom.human.textContent = visibleIssues.filter((issue) => ["needs_human", "reviewing", "awaiting_publish", "pr_open"].includes(issue.status)).length;
+  dom.done.textContent = visibleIssues.filter((issue) => issue.status === "done").length;
   renderProjects(); renderRunner(); renderRuntimes(); renderIssues();
 }
 
@@ -125,26 +132,32 @@ function renderRunner() {
 function renderRuntimes() {
   const issueIds = new Set(state.issues.filter((issue) => !state.projectId || issue.project_id === state.projectId).map((issue) => issue.id));
   const live = state.runtimes.filter((runtime) => issueIds.has(runtime.issue_id) && !["done", "cancelled"].includes(runtime.state));
+  const snapshots = state.workers.filter((worker) => !state.projectId || worker.project_id === state.projectId).map((worker) => worker.runtime_snapshot || {});
+  const retries = new Map(snapshots.flatMap((snapshot) => Array.isArray(snapshot.retrying) ? snapshot.retrying : []).map((retry) => [retry.issue_id, retry]));
+  const rateLimits = snapshots.map((snapshot) => snapshot.rate_limits).find((value) => value != null);
   dom.runtimeCount.textContent = live.length;
   dom.runtimeList.innerHTML = live.length ? live.map((runtime) => {
     const authoritative = runtime.runtime_source === "orchestrator";
     const phase = PHASE[runtime.phase] || runtime.phase || (authoritative ? "运行中" : "非运行状态");
+    const retry = retries.get(runtime.issue_id);
     return `<article class="runtime-card" data-issue-id="${escapeHtml(runtime.issue_id)}">
       <header><strong>${escapeHtml(runtime.issue_id)}</strong>${badge(runtime.state === "waiting_human" ? "needs_human" : runtime.state)}</header>
       <p>${escapeHtml(runtime.title)}</p>
       <div class="runtime-source ${authoritative ? "live" : "stored"}"><i></i><span>${authoritative ? "ORCHESTRATOR LIVE" : "DATABASE STATE"}</span><strong>${escapeHtml(phase)}</strong></div>
-      <div class="meta"><span>Attempt ${runtime.attempt_number || "—"}</span><span>Turn #${runtime.turn_count || 0}</span>${runtime.codex_app_server_pid ? `<span>Codex PID ${runtime.codex_app_server_pid}</span>` : ""}</div>
+      <div class="meta"><span>Attempt ${runtime.attempt_number || "—"}</span><span>Turn #${runtime.turn_count || 0}</span><span>Tokens ${escapeHtml(formatTokens(runtime.tokens?.total_tokens))}</span>${runtime.codex_app_server_pid ? `<span>Codex PID ${runtime.codex_app_server_pid}</span>` : ""}</div>
       <div class="attempt-session"><span>Codex Session</span><code title="${escapeHtml(runtime.session_id || "")}">${escapeHtml(short(runtime.session_id, 28))}</code></div>
       <div class="meta"><span>Thread ${escapeHtml(short(runtime.thread_id, 14))}</span><span>Current Turn ${escapeHtml(short(runtime.turn_id, 14))}</span></div>
       ${authoritative ? `<div class="runtime-activity"><span>${escapeHtml(runtime.last_message || runtime.last_event || "等待 Agent 事件")}</span><small>${escapeHtml(formatDuration(runtime.duration_seconds))} · 快照 ${escapeHtml(formatDate(runtime.snapshot_at))}</small></div>` : ""}
+      ${retry ? `<div class="runtime-activity retry"><span>Retry #${escapeHtml(retry.attempt)} · ${escapeHtml(retry.error || "等待重试")}</span><small>${escapeHtml(formatDate(retry.due_at))}</small></div>` : ""}
+      ${authoritative && rateLimits != null ? `<div class="runtime-telemetry"><span>Rate Limit</span><code title="${escapeHtml(JSON.stringify(rateLimits))}">${escapeHtml(compactTelemetry(rateLimits))}</code></div>` : ""}
     </article>`;
   }).join("") : '<div class="empty">暂无活跃 Agent</div>';
 }
 
 function renderIssues() {
   const query = dom.search.value.trim().toLowerCase();
-  const issues = state.issues.filter((issue) => (!state.projectId || issue.project_id === state.projectId) && (!query || issue.id.toLowerCase().includes(query) || issue.title.toLowerCase().includes(query)));
-  dom.issueList.innerHTML = issues.length ? issues.map((issue) => `<article class="issue-card" data-issue-id="${escapeHtml(issue.id)}"><header><strong>${escapeHtml(issue.id)} · P${issue.priority}</strong>${badge(issue.status)}</header><p>${escapeHtml(issue.title)}</p><div class="meta"><span>${escapeHtml(short(issue.source_commit))}</span><span>Workflow ${escapeHtml(short(issue.workflow_revision, 8))}</span><span>v${issue.version}</span></div></article>`).join("") : '<div class="empty">还没有 Issue</div>';
+  const issues = state.issues.filter((issue) => isVisibleIssue(issue) && (!state.projectId || issue.project_id === state.projectId) && (!query || issue.id.toLowerCase().includes(query) || issue.title.toLowerCase().includes(query)));
+  dom.issueList.innerHTML = issues.length ? issues.map((issue) => `<article class="issue-card" data-issue-id="${escapeHtml(issue.id)}"><header><strong>${escapeHtml(issue.id)} · P${issue.priority}</strong>${badge(issue.status)}</header><p>${escapeHtml(issue.title)}</p><div class="meta"><span>${escapeHtml(short(issue.source_commit))}</span><span>Workflow ${escapeHtml(short(issue.workflow_revision, 8))}</span><span>v${issue.version}</span></div></article>`).join("") : '<div class="empty">暂无符合当前筛选条件的 Issue</div>';
 }
 
 function suggestedId() { return `ISSUE-${String(Date.now()).slice(-10)}`; }
@@ -166,34 +179,91 @@ function issuePayload() {
 async function openDetail(issueId, show = true) {
   state.selected = issueId;
   try {
-    const [issue, attempts, events, decisions] = await Promise.all([
+    const [issue, attempts, events, decisions, review] = await Promise.all([
       api(`/api/issues/${encodeURIComponent(issueId)}`), api(`/api/issues/${encodeURIComponent(issueId)}/attempts`),
       api(`/api/issues/${encodeURIComponent(issueId)}/events`), api(`/api/issues/${encodeURIComponent(issueId)}/decisions`),
+      api(`/api/issues/${encodeURIComponent(issueId)}/review`).catch((error) => ({ error: error.message })),
     ]);
+    const artifactContents = await Promise.all((issue.artifacts || []).map(async (artifact) => {
+      try { return await api(`/api/issues/${encodeURIComponent(issueId)}/artifacts/${encodeURIComponent(artifact.id)}`); }
+      catch (error) { return { ...artifact, error: error.message }; }
+    }));
     dom.detailId.textContent = issue.id; dom.detailTitle.textContent = issue.title;
     const latest = attempts[0];
     const runtime = state.runtimes.find((row) => row.issue_id === issue.id);
     dom.detailContent.innerHTML = `<p class="modal-copy">${escapeHtml(issue.description)}</p><div class="detail-grid">
       <div class="detail-field"><span>Status</span><strong>${escapeHtml(STATUS[issue.status] || issue.status)}</strong></div><div class="detail-field"><span>Priority</span><strong>P${issue.priority}</strong></div>
       <div class="detail-field"><span>Project</span><strong>${escapeHtml(state.projects.find((project) => project.id === issue.project_id)?.name || issue.project_id)}</strong></div><div class="detail-field"><span>Starting commit</span><strong>${escapeHtml(short(issue.source_commit, 16))}</strong></div>
-      <div class="detail-field"><span>Workflow revision</span><strong>${escapeHtml(short(issue.workflow_revision, 16))}</strong></div><div class="detail-field"><span>Workspace</span><strong>${escapeHtml(issue.workspace_path)}</strong></div>
+      <div class="detail-field"><span>Workflow revision</span><strong>${escapeHtml(short(issue.workflow_revision, 16))}</strong></div><div class="detail-field"><span>Workspace</span><strong>${issue.archived_at ? `已归档 · ${escapeHtml(formatDate(issue.archived_at))}` : escapeHtml(issue.workspace_path)}</strong></div>
       <div class="detail-field"><span>Worker</span><strong>${escapeHtml(issue.claim.worker_id || "—")}</strong></div><div class="detail-field"><span>Codex Session</span><strong title="${escapeHtml(runtime?.session_id || latest?.session_id || "")}">${escapeHtml(short(runtime?.session_id || latest?.session_id, 28))}</strong></div>
       <div class="detail-field"><span>Thread</span><strong>${escapeHtml(short(runtime?.thread_id || latest?.thread_id, 20))}</strong></div><div class="detail-field"><span>Current Turn</span><strong>${escapeHtml(runtime?.turn_id ? `${short(runtime.turn_id, 20)} (#${runtime.turn_count})` : latest?.turn_id ? `${short(latest.turn_id, 20)} (#${latest.turn_count})` : "—")}</strong></div>
       <div class="detail-field"><span>Runtime Source</span><strong>${escapeHtml(runtime?.runtime_source === "orchestrator" ? "Orchestrator Live" : "Database")}</strong></div><div class="detail-field"><span>Agent Phase</span><strong>${escapeHtml(PHASE[runtime?.phase] || runtime?.phase || "—")}</strong></div>
       <div class="detail-field"><span>Last Agent Event</span><strong>${escapeHtml(runtime?.last_event || "—")}</strong></div><div class="detail-field"><span>Codex PID / Duration</span><strong>${escapeHtml(runtime?.codex_app_server_pid || "—")} / ${escapeHtml(formatDuration(runtime?.duration_seconds))}</strong></div>
+      <div class="detail-field"><span>Token Usage</span><strong>${escapeHtml(formatTokens(runtime?.tokens?.input_tokens))} in / ${escapeHtml(formatTokens(runtime?.tokens?.output_tokens))} out / ${escapeHtml(formatTokens(runtime?.tokens?.total_tokens))} total</strong></div><div class="detail-field"><span>Rate Limit</span><strong>${escapeHtml(compactTelemetry(state.workers.map((worker) => worker.runtime_snapshot?.rate_limits).find((value) => value != null)))}</strong></div>
       <div class="detail-field"><span>Dispatchable</span><strong>${issue.dispatchable ? "Yes" : "No"}</strong></div><div class="detail-field"><span>Labels</span><strong>${escapeHtml(issue.labels.join(", ") || "—")}</strong></div>
     </div>
     <section class="section"><h3>验收标准</h3><ul>${issue.acceptance_criteria.map((value) => `<li>${escapeHtml(value)}</li>`).join("")}</ul></section>
+    ${renderChangeSummary(review?.change_summary?.available ? review.change_summary : issue.change_summary)}
+    ${renderArtifacts(issue.artifacts || [], artifactContents)}
+    ${renderWorkspaceReview(review)}
+    ${issue.status === "reviewing" ? renderFollowUpEditor(issue) : ""}
     ${issue.pull_request ? `<section class="section"><h3>PR / Merge Request</h3><p><a href="${escapeHtml(issue.pull_request)}" target="_blank" rel="noreferrer">${escapeHtml(issue.pull_request)}</a></p></section>` : ""}
     ${issue.blocker ? `<section class="section"><h3>Blocker</h3><pre>${escapeHtml(JSON.stringify(issue.blocker, null, 2))}</pre></section>` : ""}
     ${issue.blocked_by.length ? `<section class="section"><h3>Blocked By</h3><pre>${escapeHtml(JSON.stringify(issue.blocked_by, null, 2))}</pre></section>` : ""}
     ${renderDecisions(decisions)}
     <section class="section"><h3>Attempts</h3>${attempts.length ? attempts.map((attempt, index) => renderAttempt(attempt, index, issue)).join("") : '<p class="modal-copy">尚未执行</p>'}</section>
-    <section class="section"><h3>事件</h3><div class="timeline">${events.map((event) => `<article><strong>${escapeHtml(event.event)}</strong><small> · ${escapeHtml(formatDate(event.created_at))}</small><div class="meta"><span>${escapeHtml(event.from_status || "—")} → ${escapeHtml(event.to_status || "—")}</span><span>${escapeHtml(event.actor_type)}</span></div>${event.payload?.reason ? `<p class="event-reason">${escapeHtml(event.payload.reason)}</p>` : ""}</article>`).join("")}</div></section>`;
+    <section class="section"><h3>事件</h3><div class="timeline">${events.map((event) => `<article><strong>${escapeHtml(event.event)}</strong><small> · ${escapeHtml(formatDate(event.created_at))}</small><div class="meta"><span>${escapeHtml(event.from_status || "—")} → ${escapeHtml(event.to_status || "—")}</span><span>${escapeHtml(event.actor_type)}</span></div>${event.payload?.reason ? `<p class="event-reason">${escapeHtml(event.payload.reason)}</p>` : ""}${event.payload && Object.keys(event.payload).length ? `<details class="event-payload"><summary>查看事件详情</summary><pre>${escapeHtml(JSON.stringify(event.payload, null, 2))}</pre></details>` : ""}</article>`).join("")}</div></section>`;
     renderActions(issue, decisions);
     dom.detailError.hidden = true;
     if (show && !dom.detailModal.open) dom.detailModal.showModal();
   } catch (error) { if (show) toast(error.message, true); }
+}
+
+function renderChangeSummary(summary) {
+  if (!summary?.available && !summary?.overview) return '<section class="section review-section"><h3>改动总结</h3><p class="modal-copy">暂无可用的改动总结。</p></section>';
+  const typeParts = [
+    ["新增", summary.files_added], ["修改", summary.files_modified], ["删除", summary.files_deleted],
+    ["重命名", summary.files_renamed], ["未跟踪", summary.files_untracked],
+  ].filter(([, count]) => Number(count) > 0).map(([label, count]) => `${label} ${Number(count)}`);
+  const areas = (summary.areas || []).join("、") || "根目录";
+  const paths = summary.changed_paths || [];
+  const commits = summary.commit_subjects || [];
+  const overview = summary.overview
+    ? `<p class="change-overview">${escapeHtml(summary.overview)}</p>`
+    : '<p class="modal-copy">Agent 尚未提供面向功能的改动说明。</p>';
+  const gitDetails = summary.available ? `<details class="change-details"><summary>查看 Git 统计</summary><p class="modal-copy">共 ${Number(summary.files_total || 0)} 个文件，+${Number(summary.additions || 0)} / -${Number(summary.deletions || 0)} 行；${escapeHtml(typeParts.join("，") || "无文件变化")}。主要涉及：${escapeHtml(areas)}。</p><div class="meta"><span>${Number(summary.commit_count || 0)} 个本地提交</span>${summary.binary_files ? `<span>${Number(summary.binary_files)} 个二进制文件</span>` : ""}</div>${commits.length ? `<details><summary>提交摘要</summary><pre class="review-status">${escapeHtml(commits.join("\n"))}</pre></details>` : ""}${paths.length ? `<details><summary>变更文件（${paths.length}）</summary><pre class="review-status">${escapeHtml(paths.join("\n"))}</pre></details>` : ""}</details>` : "";
+  return `<section class="section review-section"><h3>改动总结</h3>${overview}${gitDetails}</section>`;
+}
+
+function renderArtifacts(artifacts, contents) {
+  if (!artifacts.length) return '<section class="section review-section"><h3>交付产物</h3><p class="modal-copy">Agent 未登记产物；请检查 Workspace 变更后再决定是否验收。</p></section>';
+  const byId = new Map(contents.map((item) => [item.id, item]));
+  return `<section class="section review-section"><h3>交付产物 <span class="section-count">${artifacts.length}</span></h3><div class="artifact-list">${artifacts.map((artifact, index) => {
+    const preview = byId.get(artifact.id) || artifact;
+    const checksum = preview.registered_sha256_matches == null ? "未登记校验值" : preview.registered_sha256_matches ? "SHA256 匹配" : "SHA256 不匹配";
+    const body = preview.error
+      ? `<p class="artifact-error">${escapeHtml(preview.error)}</p>`
+      : preview.content == null
+        ? '<p class="modal-copy">该媒体类型暂不支持文本预览。</p>'
+        : `<pre class="artifact-preview">${escapeHtml(preview.content)}${preview.truncated ? "\n\n… 内容过长，预览已截断" : ""}</pre>`;
+    return `<article class="artifact-card"><header><strong>${escapeHtml(artifact.path)}</strong><span class="badge ${preview.registered_sha256_matches === false ? "blocked" : "done"}">${escapeHtml(checksum)}</span></header><div class="meta"><span>${escapeHtml(preview.media_type || artifact.media_type || "unknown")}</span><span>${escapeHtml(Number(preview.size_bytes || 0).toLocaleString())} bytes</span><span>Revision ${escapeHtml(short(artifact.revision, 12))}</span></div><details ${index === 0 ? "open" : ""}><summary>查看产物内容</summary>${body}</details></article>`;
+  }).join("")}</div></section>`;
+}
+
+function renderWorkspaceReview(review) {
+  if (review?.error) return `<section class="section review-section"><h3>Workspace 变更</h3><p class="artifact-error">${escapeHtml(review.error)}</p></section>`;
+  const status = review?.status || [];
+  const changedFiles = review?.changed_files || [];
+  const commits = review?.commits || [];
+  const cleanCopy = changedFiles.length
+    ? "Git 工作区干净；以下展示从 Issue 起始 Commit 累积的交付变更。"
+    : "Git 工作区干净，且相对 Issue 起始 Commit 没有交付变更。";
+  return `<section class="section review-section"><h3>交付变更 <span class="section-count">${changedFiles.length}</span></h3><p class="workspace-path">${escapeHtml(review?.workspace_path || "—")}</p><div class="detail-grid"><div class="detail-field"><span>Base Commit</span><strong>${escapeHtml(short(review?.base_commit, 16))}</strong></div><div class="detail-field"><span>Delivery HEAD</span><strong>${escapeHtml(short(review?.head_commit, 16))}</strong></div></div>${commits.length ? `<h4>本地提交</h4><pre class="review-status">${escapeHtml(commits.join("\n"))}</pre>` : ""}${status.length ? `<h4>未提交变更</h4><pre class="review-status">${escapeHtml(status.join("\n"))}</pre>` : `<p class="modal-copy">${cleanCopy}</p>`}${review?.diff_stat ? `<pre class="review-stat">${escapeHtml(review.diff_stat)}</pre>` : ""}${review?.diff ? `<details open><summary>查看完整交付 Diff${review.diff_truncated ? "（已截断）" : ""}</summary><pre class="review-diff">${escapeHtml(review.diff)}</pre></details>` : ""}</section>`;
+}
+
+function renderFollowUpEditor(issue) {
+  const draft = state.followUpDrafts.get(issue.id) || "";
+  return `<section class="section follow-up-section"><h3>补充要求并继续执行</h3><p class="modal-copy">保留当前 Workspace、产物和会话上下文，创建新的恢复 Attempt 继续完成同一个 Issue。</p><textarea data-followup-instruction="${escapeHtml(issue.id)}" placeholder="例如：分析方案确认，按方案完成代码实现、测试和验证。">${escapeHtml(draft)}</textarea><button class="button secondary" data-followup-submit="${escapeHtml(issue.id)}" data-version="${issue.version}">提交并继续执行</button></section>`;
 }
 
 function renderDecisions(decisions) {
@@ -209,13 +279,17 @@ function renderActions(issue) {
   if (issue.status === "pr_open") buttons.push(["confirm_merge", "核验 PR / MR 已合并"]);
   if (issue.status === "blocked") buttons.push(["retry_requested", "解除阻塞并重试"]);
   if (["ready", "running", "retry_queued", "needs_human", "blocked", "reviewing"].includes(issue.status)) buttons.push(["cancelled", issue.status === "running" ? "停止并取消 Issue" : "取消 Issue"]);
+  if (!issue.archived_at) buttons.push(["force_archive", "强制归档 Workspace"]);
   dom.detailActions.innerHTML = buttons.map(([action, label]) => `<button class="button ${action === "cancelled" ? "ghost" : ""}" data-action="${action}" data-version="${issue.version}">${label}</button>`).join("");
 }
 
 async function runAction(action, version) {
   const issueId = state.selected; if (!issueId) return;
   try {
-    if (["approve_result", "authorize_publish", "confirm_merge"].includes(action)) {
+    if (action === "force_archive") {
+      if (!window.confirm("强制归档会停止当前 Agent、将未完成 Issue 置为 Cancelled，并永久删除本地 Workspace 及其中未发布的文件；Issue、Attempt、事件和产物登记记录会保留。确认继续？")) return;
+      await api(`/api/issues/${encodeURIComponent(issueId)}/archive`, { method: "POST", body: JSON.stringify({ expected_version: Number(version), authorization: true }) });
+    } else if (["approve_result", "authorize_publish", "confirm_merge"].includes(action)) {
       if (!window.confirm("这是显式交付门禁，确认继续？")) return;
       await api(`/api/issues/${encodeURIComponent(issueId)}/delivery`, { method: "POST", body: JSON.stringify({ action, expected_version: Number(version), authorization: true }) });
     } else {
@@ -223,12 +297,13 @@ async function runAction(action, version) {
       const toStatus = action === "retry_requested" ? "ready" : "cancelled";
       await api(`/api/issues/${encodeURIComponent(issueId)}/status`, { method: "POST", body: JSON.stringify({ to_status: toStatus, event: action, actor_type: "human", actor_id: "control-plane-ui", payload: {} }) });
     }
-    toast("操作完成"); await refresh();
+    toast(action === "force_archive" ? "Workspace 已强制归档" : "操作完成"); await refresh();
   } catch (error) { dom.detailError.textContent = error.message; dom.detailError.hidden = false; }
 }
 
-dom.newIssue.addEventListener("click", openNewIssue); dom.newProject.addEventListener("click", () => { dom.projectForm.reset(); dom.projectError.hidden = true; dom.projectModal.showModal(); }); dom.tokenButton.addEventListener("click", openToken); dom.refresh.addEventListener("click", refresh);
+dom.newIssue.addEventListener("click", openNewIssue); dom.newProject.addEventListener("click", () => { dom.projectForm.reset(); dom.projectError.hidden = true; dom.projectModal.showModal(); }); dom.tokenButton.addEventListener("click", openToken); dom.refresh.addEventListener("click", () => refresh());
 dom.projectFilter.addEventListener("change", () => { state.projectId = dom.projectFilter.value; localStorage.setItem("acp_project_id", state.projectId); render(); });
+dom.showInactive.addEventListener("change", () => { state.showInactive = dom.showInactive.checked; localStorage.setItem("acp_show_inactive", String(state.showInactive)); render(); });
 dom.projectList.addEventListener("click", async (event) => { const remove = event.target.closest("[data-project-delete]"); if (remove) { if (!window.confirm(`确认删除项目“${remove.dataset.projectName}”？项目已有 Issue 时系统会拒绝删除。`)) return; try { await api(`/api/projects/${encodeURIComponent(remove.dataset.projectDelete)}`, { method: "DELETE" }); if (state.projectId === remove.dataset.projectDelete) { state.projectId = ""; localStorage.removeItem("acp_project_id"); } toast("项目已删除"); await refresh(); } catch (error) { toast(error.message, true); } return; } const validate = event.target.closest("[data-project-validate]"); if (validate) { try { const project = await api(`/api/projects/${encodeURIComponent(validate.dataset.projectValidate)}/validate`, { method: "POST", body: "{}" }); toast(project.status === "available" ? "Workflow 校验通过" : project.validation_error, project.status !== "available"); await refresh(); } catch (error) { toast(error.message, true); } return; } const card = event.target.closest("[data-project-id]"); if (!card) return; state.projectId = card.dataset.projectId; localStorage.setItem("acp_project_id", state.projectId); render(); });
 dom.search.addEventListener("input", renderIssues);
 dom.runnerButton.addEventListener("click", async () => { try { const action = dom.runnerButton.dataset.action; await api(`/api/projects/${encodeURIComponent(state.projectId)}/runtime/${action}`, { method: "POST", body: "{}" }); toast(action === "start" ? "项目 Runtime 已启动" : "项目 Runtime 已停止"); await refresh(); } catch (error) { toast(error.message, true); } });
@@ -241,8 +316,31 @@ $("#token-cancel-button").addEventListener("click", () => dom.tokenModal.close()
 dom.issueList.addEventListener("click", (event) => { const card = event.target.closest("[data-issue-id]"); if (card) openDetail(card.dataset.issueId); });
 dom.runtimeList.addEventListener("click", (event) => { const card = event.target.closest("[data-issue-id]"); if (card) openDetail(card.dataset.issueId); });
 dom.detailActions.addEventListener("click", (event) => { const button = event.target.closest("[data-action]"); if (button) runAction(button.dataset.action, button.dataset.version); });
-dom.detailContent.addEventListener("input", (event) => { const editor = event.target.closest("[data-decision-response]"); if (editor) state.decisionDrafts.set(editor.dataset.decisionResponse, editor.value); });
-dom.detailContent.addEventListener("click", async (event) => { const button = event.target.closest("[data-resolve]"); if (!button) return; const response = dom.detailContent.querySelector(`[data-decision-response="${CSS.escape(button.dataset.resolve)}"]`).value.trim(); if (!response) return; try { await api(`/api/issues/${encodeURIComponent(state.selected)}/decisions`, { method: "POST", body: JSON.stringify({ action: "resolve", decision_id: button.dataset.resolve, response, actor_id: "control-plane-ui" }) }); state.decisionDrafts.delete(button.dataset.resolve); toast("决定已提交，Issue 已恢复 Ready"); await refresh(); } catch (error) { toast(error.message, true); } });
+dom.detailContent.addEventListener("input", (event) => { const decision = event.target.closest("[data-decision-response]"); if (decision) state.decisionDrafts.set(decision.dataset.decisionResponse, decision.value); const followUp = event.target.closest("[data-followup-instruction]"); if (followUp) state.followUpDrafts.set(followUp.dataset.followupInstruction, followUp.value); });
+dom.detailContent.addEventListener("click", async (event) => {
+  const followUp = event.target.closest("[data-followup-submit]");
+  if (followUp) {
+    const issueId = followUp.dataset.followupSubmit;
+    const editor = dom.detailContent.querySelector(`[data-followup-instruction="${CSS.escape(issueId)}"]`);
+    const instruction = editor?.value.trim() || "";
+    if (!instruction) { toast("请先填写补充要求", true); return; }
+    followUp.disabled = true;
+    try {
+      await api(`/api/issues/${encodeURIComponent(issueId)}/continue`, { method: "POST", body: JSON.stringify({ expected_version: Number(followUp.dataset.version), instruction }) });
+      state.followUpDrafts.delete(issueId);
+      toast("补充要求已提交，Agent 将在原 Workspace 中继续执行");
+      await refresh();
+    } catch (error) { toast(error.message, true); followUp.disabled = false; }
+    return;
+  }
+  const button = event.target.closest("[data-resolve]"); if (!button) return; const response = dom.detailContent.querySelector(`[data-decision-response="${CSS.escape(button.dataset.resolve)}"]`).value.trim(); if (!response) return; try { await api(`/api/issues/${encodeURIComponent(state.selected)}/decisions`, { method: "POST", body: JSON.stringify({ action: "resolve", decision_id: button.dataset.resolve, response, actor_id: "control-plane-ui" }) }); state.decisionDrafts.delete(button.dataset.resolve); toast("决定已提交，Issue 已恢复 Ready"); await refresh(); } catch (error) { toast(error.message, true); }
+});
 $("#detail-close").addEventListener("click", () => { state.selected = null; dom.detailModal.close(); });
-window.setInterval(() => { if (!document.hidden && !dom.issueModal.open && !dom.projectModal.open && !dom.tokenModal.open) refresh(); }, 5000);
+window.setInterval(() => {
+  if (!document.hidden && !dom.issueModal.open && !dom.projectModal.open && !dom.tokenModal.open) {
+    // Keep dashboard/runtime state live without replacing the open detail DOM.
+    // Replacing it resets modal, artifact-preview, and expanded-section scroll.
+    refresh({ refreshDetail: !dom.detailModal.open });
+  }
+}, 5000);
 refresh();

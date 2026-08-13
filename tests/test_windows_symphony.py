@@ -93,6 +93,44 @@ async def test_tracker_human_request_preserves_thread_for_resume(api):
         await tracker.close()
 
 
+async def test_tracker_claim_includes_human_follow_up_instruction(api):
+    await api.post("/api/issues", json=issue_payload())
+    tracker = _tracker(api)
+    try:
+        lease = await tracker.claim((await tracker.candidates())[0], {"kind": "coding_agent"})
+        await tracker.update_attempt_context(
+            lease, thread_id="thread-follow-up", turn_id="turn-analysis", turn_count=1
+        )
+        await tracker.execute_tool(
+            lease, "issue_complete", {}, thread_id="thread-follow-up"
+        )
+        reviewing = (await api.get("/api/issues/ISSUE-001")).json()
+        response = await api.post(
+            "/api/issues/ISSUE-001/continue",
+            json={
+                "expectedVersion": reviewing["version"],
+                "instruction": "Continue with implementation and tests.",
+            },
+        )
+        assert response.status_code == 200, response.text
+
+        resumed = await tracker.claim(
+            (await tracker.candidates())[0], {"kind": "coding_agent"}
+        )
+        assert resumed.resume_thread_id == "thread-follow-up"
+        assert resumed.resume_instructions == [
+            "Continue with implementation and tests."
+        ]
+        assert resumed.resume_decisions[-1]["requested_by"] == (
+            "control-plane-followup"
+        )
+        assert resumed.resume_decisions[-1]["response"] == (
+            "Continue with implementation and tests."
+        )
+    finally:
+        await tracker.close()
+
+
 async def test_tracker_rejects_unsafe_artifact_path_without_mutating_issue(api):
     await api.post("/api/issues", json=issue_payload())
     tracker = _tracker(api)

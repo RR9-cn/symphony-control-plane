@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -13,7 +14,7 @@ from control_plane.errors import ConflictError, NotFoundError, RepositoryResolut
 from control_plane.models import Issue, Project, ProjectWorkflowSnapshot, utc_now
 from control_plane.schemas import ProjectCreate, ProjectPatch, ProjectView, WorkflowSnapshotView
 from symphony_windows.skill import validate_skill_package
-from symphony_windows.workflow import Workflow, WorkflowError, load_workflow
+from symphony_windows.workflow import SkillSourceConfig, Workflow, WorkflowError, load_workflow
 
 
 COMMIT_PATTERN = re.compile(r"^[a-f0-9]{40}$")
@@ -51,6 +52,38 @@ class ProjectService:
         if project is None:
             raise NotFoundError(f"project not found: {project_id}")
         return await self._view(project)
+
+    async def refresh_if_changed(self, project_id: str) -> ProjectView:
+        """Run full validation only when the local default-branch commit changed."""
+        project = await self._require(project_id)
+        snapshot = (
+            await self.session.get(
+                ProjectWorkflowSnapshot, project.current_snapshot_id
+            )
+            if project.current_snapshot_id
+            else None
+        )
+        try:
+            repository = self._repository_path(project.repository_path)
+            source_commit = await self._git(
+                repository,
+                "rev-parse",
+                "--verify",
+                f"{project.default_branch}^{{commit}}",
+            )
+        except (OSError, TimeoutError, RepositoryResolutionError):
+            await self.session.rollback()
+            return await self.validate(project_id)
+        if (
+            project.enabled
+            and project.status == "available"
+            and snapshot is not None
+            and snapshot.status == "valid"
+            and snapshot.source_commit == source_commit
+        ):
+            return await self._view(project)
+        await self.session.rollback()
+        return await self.validate(project_id)
 
     async def patch(self, project_id: str, command: ProjectPatch) -> ProjectView:
         values = command.model_dump(exclude_none=True)
@@ -97,10 +130,16 @@ class ProjectService:
             workflow_path = self._contained_file(repository, project.workflow_path)
             source = workflow_path.read_text(encoding="utf-8")
             revision = hashlib.sha256(source.encode("utf-8")).hexdigest()
-            source_commit = await self._git(repository, "rev-parse", "--verify", "HEAD^{commit}")
+            source_commit = await self._git(
+                repository,
+                "rev-parse",
+                "--verify",
+                f"{project.default_branch}^{{commit}}",
+            )
             if not COMMIT_PATTERN.fullmatch(source_commit):
-                raise RepositoryResolutionError("repository HEAD is not a full commit SHA")
-            await self._git(repository, "rev-parse", "--verify", f"{project.default_branch}^{{commit}}")
+                raise RepositoryResolutionError(
+                    "repository default branch is not a full commit SHA"
+                )
             tracked = await self._git(
                 repository,
                 "status",
@@ -122,9 +161,10 @@ class ProjectService:
                 worker_id_override=f"project-validator:{project.key}",
                 project_id_override=project.id,
             )
-            self._validate_skills(repository)
+            if workflow.skills is None:
+                self._validate_skills(repository)
             parsed = self._workflow_snapshot(workflow)
-            parsed["project_assets"] = self._asset_manifest(repository)
+            parsed["project_assets"] = await self._asset_manifest(repository, workflow)
         except (OSError, TimeoutError, WorkflowError, RepositoryResolutionError) as error:
             await self.session.rollback()
             async with self.session.begin():
@@ -268,8 +308,7 @@ class ProjectService:
             if missing:
                 raise RepositoryResolutionError(f"skill {name} requires missing repository Skills: {', '.join(sorted(missing))}")
 
-    @staticmethod
-    def _asset_manifest(repository: Path) -> dict[str, Any]:
+    async def _asset_manifest(self, repository: Path, workflow: Workflow) -> dict[str, Any]:
         agents = repository / "AGENTS.md"
         agents_entry = None
         if agents.is_file():
@@ -277,22 +316,70 @@ class ProjectService:
                 "path": "AGENTS.md",
                 "sha256": hashlib.sha256(agents.read_bytes()).hexdigest(),
             }
+        if workflow.skills is not None:
+            skills = await self._external_skill_manifest(workflow.skills)
+            source = {
+                "kind": "git",
+                "repository": workflow.skills.repository,
+                "revision": workflow.skills.revision,
+                "source_path": workflow.skills.source_path,
+                "target_path": workflow.skills.target_path,
+            }
+        else:
+            root = repository / ".codex" / "skills"
+            skills = self._skill_manifest(root, repository) if root.is_dir() else []
+            source = {"kind": "repository", "path": ".codex/skills"}
+        return {"agents_md": agents_entry, "skills": skills, "skills_source": source}
+
+    async def _external_skill_manifest(self, config: SkillSourceConfig) -> list[dict[str, str]]:
+        with tempfile.TemporaryDirectory(prefix="symphony-skill-manifest-") as temporary:
+            checkout = Path(temporary) / "repository"
+            await self._run_git("clone", "--no-checkout", "--", config.repository, str(checkout), timeout=120)
+            await self._git(checkout, "config", "core.longpaths", "true")
+            actual_revision = await self._git(
+                checkout, "rev-parse", "--verify", f"{config.revision}^{{commit}}"
+            )
+            if actual_revision != config.revision:
+                raise RepositoryResolutionError("configured Skills revision does not resolve exactly")
+            await self._git(checkout, "checkout", "--detach", config.revision)
+            root = checkout.joinpath(*PurePosixPath(config.source_path).parts).resolve(strict=True)
+            if not root.is_relative_to(checkout.resolve()) or not root.is_dir():
+                raise RepositoryResolutionError("skills.source_path must be a directory inside the Skills checkout")
+            return self._skill_manifest(root, root, config=config)
+
+    @staticmethod
+    def _skill_manifest(
+        root: Path,
+        relative_to: Path,
+        *,
+        config: SkillSourceConfig | None = None,
+    ) -> list[dict[str, str]]:
         skills: list[dict[str, str]] = []
-        root = repository / ".codex" / "skills"
-        if root.is_dir():
-            for instruction in sorted(root.glob("*/SKILL.md")):
-                skill_root = instruction.parent
-                digest = hashlib.sha256()
-                for path in sorted(item for item in skill_root.rglob("*") if item.is_file()):
-                    resolved = path.resolve(strict=True)
-                    if not resolved.is_relative_to(root.resolve()):
-                        raise RepositoryResolutionError(f"skill file escapes project repository: {path}")
-                    digest.update(path.relative_to(skill_root).as_posix().encode("utf-8"))
-                    digest.update(b"\0")
-                    digest.update(path.read_bytes())
-                    digest.update(b"\0")
-                skills.append({"name": skill_root.name, "path": instruction.relative_to(repository).as_posix(), "sha256": digest.hexdigest()})
-        return {"agents_md": agents_entry, "skills": skills}
+        resolved_root = root.resolve(strict=True)
+        for instruction in sorted(root.glob("*/SKILL.md")):
+            skill_root = instruction.parent
+            digest = hashlib.sha256()
+            for path in sorted(item for item in skill_root.rglob("*") if item.is_file()):
+                resolved = path.resolve(strict=True)
+                if not resolved.is_relative_to(resolved_root):
+                    raise RepositoryResolutionError(f"skill file escapes configured Skills root: {path}")
+                digest.update(path.relative_to(skill_root).as_posix().encode("utf-8"))
+                digest.update(b"\0")
+                digest.update(path.read_bytes())
+                digest.update(b"\0")
+            if config is None:
+                display_path = instruction.relative_to(relative_to).as_posix()
+            else:
+                display_path = (
+                    f"{config.repository}@{config.revision}/"
+                    f"{config.source_path}/{skill_root.name}/SKILL.md"
+                )
+            skills.append(
+                {"name": skill_root.name, "path": display_path, "sha256": digest.hexdigest()}
+            )
+        if config is not None and not skills:
+            raise RepositoryResolutionError("configured Skills source contains no */SKILL.md packages")
+        return skills
 
     @staticmethod
     async def _git(repository: Path, *arguments: str) -> str:
@@ -306,6 +393,17 @@ class ProjectService:
         return stdout.decode(errors="replace").strip().lower()
 
     @staticmethod
+    async def _run_git(*arguments: str, timeout: float = 10) -> str:
+        process = await asyncio.create_subprocess_exec(
+            "git", *arguments,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        if process.returncode != 0:
+            raise RepositoryResolutionError(stderr.decode(errors="replace").strip() or "Git command failed")
+        return stdout.decode(errors="replace").strip()
+
+    @staticmethod
     def _workflow_snapshot(workflow: Workflow) -> dict[str, Any]:
         return {
             "tracker": {
@@ -317,6 +415,16 @@ class ProjectService:
             },
             "polling_interval_ms": workflow.polling_interval_ms,
             "workspace": {"root": str(workflow.workspace.root)},
+            "skills": (
+                {
+                    "repository": workflow.skills.repository,
+                    "revision": workflow.skills.revision,
+                    "source_path": workflow.skills.source_path,
+                    "target_path": workflow.skills.target_path,
+                }
+                if workflow.skills is not None
+                else None
+            ),
             "agent": workflow.agent.snapshot(),
             "codex": {
                 "command": workflow.codex.command,

@@ -1,4 +1,4 @@
-# Fshows Symphony Control Plane
+# Symphony Control Plane
 
 Windows 原生、SQLite 持久化的 OpenAI Symphony 风格 Agent 调度器。调度单位只有 `Issue`，项目仓库是执行配置、规则和能力的唯一来源。
 

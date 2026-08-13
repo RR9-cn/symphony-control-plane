@@ -90,6 +90,64 @@ class IssueDeliveryManager:
         commit = (await _run("git", "rev-parse", "HEAD", cwd=repository)).strip()
         return branch, commit
 
+    async def assert_base_unchanged(
+        self,
+        *,
+        source_repository: str,
+        base_branch: str,
+        expected_commit: str,
+    ) -> None:
+        current = (
+            await _run(
+                "git",
+                "rev-parse",
+                "--verify",
+                f"{base_branch}^{{commit}}",
+                cwd=Path(source_repository),
+            )
+        ).strip()
+        if current != expected_commit:
+            raise DeliveryError(
+                f"target branch {base_branch} advanced from "
+                f"{expected_commit[:12]} to {current[:12]}; continue the Issue "
+                "to integrate the latest target and rerun validation"
+            )
+
+    async def assert_base_is_ancestor(
+        self,
+        issue_id: str,
+        *,
+        source_repository: str,
+        base_branch: str,
+        commit: str,
+    ) -> None:
+        repository = await self.repository(issue_id)
+        actual = (await _run("git", "rev-parse", "HEAD", cwd=repository)).strip()
+        if actual != commit:
+            raise DeliveryError("Issue workspace HEAD does not match local delivery commit")
+        await _run(
+            "git",
+            "fetch",
+            "--no-tags",
+            "--",
+            source_repository,
+            base_branch,
+            cwd=repository,
+        )
+        target = (await _run("git", "rev-parse", "FETCH_HEAD", cwd=repository)).strip()
+        ancestry = await _run_result(
+            "git", "merge-base", "--is-ancestor", target, commit, cwd=repository
+        )
+        if ancestry.returncode == 1:
+            raise DeliveryError(
+                f"target branch {base_branch} advanced to {target[:12]}; continue "
+                "the Issue to integrate the latest target and rerun validation"
+            )
+        if ancestry.returncode != 0:
+            raise DeliveryError(
+                _process_error(ancestry, "cannot verify target branch ancestry")
+            )
+
     async def publish(
         self,
         issue_id: str,

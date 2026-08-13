@@ -3,6 +3,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from control_plane.app import _refresh_projects_once
+from control_plane.project_service import ProjectService
 from conftest import claim_payload, issue_payload
 
 
@@ -22,6 +24,123 @@ async def test_project_snapshot_is_pinned_into_new_issue(api) -> None:
     assert issue["source_commit"] == project["current_snapshot"]["source_commit"]
     assert issue["workflow_revision"] == project["current_snapshot"]["workflow_revision"]
     assert issue["workspace_path"].endswith("ISSUE-001")
+
+
+async def test_new_issue_refreshes_default_branch_snapshot(api) -> None:
+    project = (await api.get("/api/projects")).json()[0]
+    repository = Path(project["repository_path"])
+    (repository / "latest.txt").write_text("latest\n", encoding="utf-8")
+    subprocess.run(["git", "add", "latest.txt"], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "advance default branch"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+    )
+    latest = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    response = await api.post("/api/issues", json=issue_payload())
+
+    assert response.status_code == 201, response.text
+    assert response.json()["source_commit"] == latest
+    refreshed = (await api.get(f"/api/projects/{project['id']}")).json()
+    assert refreshed["current_snapshot"]["source_commit"] == latest
+
+
+async def test_project_snapshot_uses_default_branch_not_checked_out_head(
+    api, tmp_path: Path
+) -> None:
+    repository = tmp_path / "project-on-side-branch"
+    repository.mkdir()
+    subprocess.run(["git", "init"], cwd=repository, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repository, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repository, check=True)
+    source_project = (await api.get("/api/projects")).json()[0]
+    workflow = Path(source_project["repository_path"]) / "WORKFLOW.md"
+    (repository / "WORKFLOW.md").write_text(
+        workflow.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    subprocess.run(["git", "add", "WORKFLOW.md"], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "default branch"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+    )
+    default_commit = subprocess.run(
+        ["git", "rev-parse", "master"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "checkout", "-b", "side"], cwd=repository, check=True, capture_output=True)
+    (repository / "side.txt").write_text("side\n", encoding="utf-8")
+    subprocess.run(["git", "add", "side.txt"], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "side branch"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+    )
+
+    response = await api.post(
+        "/api/projects",
+        json={
+            "key": "side-project",
+            "name": "Side Project",
+            "repository_path": str(repository),
+            "default_branch": "master",
+            "workflow_path": "WORKFLOW.md",
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["current_snapshot"]["source_commit"] == default_commit
+
+
+async def test_project_refresh_continues_after_one_project_fails(
+    api, tmp_path: Path, monkeypatch
+) -> None:
+    first = (await api.get("/api/projects")).json()[0]
+    repository = tmp_path / "second-project"
+    subprocess.run(
+        ["git", "clone", "--quiet", first["repository_path"], str(repository)],
+        check=True,
+        capture_output=True,
+    )
+    second_response = await api.post(
+        "/api/projects",
+        json={
+            "key": "second-project",
+            "name": "Second Project",
+            "repository_path": str(repository),
+            "default_branch": "master",
+            "workflow_path": "WORKFLOW.md",
+        },
+    )
+    assert second_response.status_code == 201, second_response.text
+    second = second_response.json()
+    calls: list[str] = []
+
+    async def refresh(_self, project_id: str):
+        calls.append(project_id)
+        if project_id == first["id"]:
+            raise RuntimeError("first project failed")
+
+    monkeypatch.setattr(ProjectService, "refresh_if_changed", refresh)
+    failures = api.app.state.project_refresh_failures
+
+    await _refresh_projects_once(api.app)
+
+    assert set(calls) == {first["id"], second["id"]}
+    assert api.app.state.project_refresh_failures == failures + 1
 
 
 async def test_missing_workflow_is_bootstrapped_without_auto_commit(api, tmp_path: Path) -> None:

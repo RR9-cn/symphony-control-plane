@@ -68,6 +68,59 @@ async def test_prepare_uses_nested_repo_without_falling_through_to_parent(tmp_pa
     assert _git(tmp_path, "status", "--short") == "?? workspaces/"
 
 
+async def test_delivery_rejects_changed_target_before_approval(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    _git(source, "init")
+    _git(source, "config", "user.email", "test@example.com")
+    _git(source, "config", "user.name", "Test")
+    (source / "README.md").write_text("base\n", encoding="utf-8")
+    _git(source, "add", "README.md")
+    _git(source, "commit", "-m", "base")
+    base = _git(source, "rev-parse", "HEAD")
+    (source / "README.md").write_text("advanced\n", encoding="utf-8")
+    _git(source, "commit", "-am", "advance")
+
+    with pytest.raises(DeliveryError, match="target branch master advanced"):
+        await IssueDeliveryManager(tmp_path).assert_base_unchanged(
+            source_repository=str(source),
+            base_branch="master",
+            expected_commit=base,
+        )
+
+
+async def test_delivery_rejects_commit_without_latest_target_ancestor(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    _git(source, "init")
+    _git(source, "config", "user.email", "test@example.com")
+    _git(source, "config", "user.name", "Test")
+    (source / "README.md").write_text("base\n", encoding="utf-8")
+    _git(source, "add", "README.md")
+    _git(source, "commit", "-m", "base")
+    root = tmp_path / "workspaces"
+    workspace = root / workspace_key("ISSUE-STALE")
+    workspace.parent.mkdir(parents=True)
+    _git(tmp_path, "clone", str(source), str(workspace))
+    _git(workspace, "config", "user.email", "test@example.com")
+    _git(workspace, "config", "user.name", "Test")
+    (workspace / "feature.txt").write_text("feature\n", encoding="utf-8")
+    _git(workspace, "add", "feature.txt")
+    _git(workspace, "commit", "-m", "feature")
+    feature = _git(workspace, "rev-parse", "HEAD")
+    (source / "target.txt").write_text("target\n", encoding="utf-8")
+    _git(source, "add", "target.txt")
+    _git(source, "commit", "-m", "advance target")
+
+    with pytest.raises(DeliveryError, match="target branch master advanced"):
+        await IssueDeliveryManager(root).assert_base_is_ancestor(
+            "ISSUE-STALE",
+            source_repository=str(source),
+            base_branch="master",
+            commit=feature,
+        )
+
+
 def test_github_repository_parsing():
     assert _github_repo("git@github.com:openai/symphony.git") == "openai/symphony"
     assert _github_repo("https://github.com/openai/symphony") == "openai/symphony"

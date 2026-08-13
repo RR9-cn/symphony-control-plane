@@ -125,6 +125,8 @@ class Issue(Base):
     local_commit: Mapped[str | None] = mapped_column(String(40), nullable=True)
     pull_request: Mapped[str | None] = mapped_column(String(2000), nullable=True)
     merged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    change_summary: Mapped[dict[str, Any]] = mapped_column(JSON_VALUE, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
@@ -197,9 +199,9 @@ class AgentAttempt(Base):
 
     @property
     def session_id(self) -> str | None:
-        # Codex resumes a conversation by thread ID; turn IDs identify messages
-        # within that stable session and must not become part of its identity.
-        return self.thread_id
+        if self.thread_id and self.turn_id:
+            return f"{self.thread_id}-{self.turn_id}"
+        return None
 
     @property
     def duration_seconds(self) -> float:
