@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "symphony-control-plane"
 version = "0.1.0"
-description = "Persistent Issue control plane for Symphony and Codex agents"
+description = "Windows-native control plane for repository-driven Symphony and Codex agents"
 requires-python = ">=3.11"
 dependencies = [
   "alembic>=1.17,<2",
@@ -21,6 +21,7 @@ dependencies = [
 ]
 
 [project.scripts]
+symphony-control-plane-runner = "symphony_windows.cli:main"
 fshows-symphony-windows = "symphony_windows.cli:main"
 
 [project.optional-dependencies]

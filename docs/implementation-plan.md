@@ -1,4 +1,4 @@
-# Fshows Symphony 实施方案
+# Symphony Control Plane 实施方案
 
 更新时间：2026-08-05
 

@@ -1,4 +1,4 @@
-# Fshows Symphony V2：项目仓库驱动技术方案
+# Symphony Control Plane V2：项目仓库驱动技术方案
 
 状态：Draft
 更新时间：2026-08-05
@@ -40,7 +40,7 @@ V2 继续坚持以下边界：
 
 V2 按这一原则调整，同时保留本项目的多项目 UI 和 SQLite Control Plane 扩展：
 
-| 能力 | Symphony 核心语义 | Fshows V2 |
+| 能力 | Symphony 核心语义 | 本项目 V2 |
 |---|---|---|
 | Workflow 所有权 | 项目仓库 | 项目仓库 |
 | Issue 调度 | Tracker 范围内的 Issue | 手工 Tracker 中按 `project_id` 分区的 Issue |
